@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+websockets
+aiohttp
+transformers
+torch
+feedparser
+pydantic
+python-multipart
+jinja2
+python-jose[cryptography]
+passlib[bcrypt]
