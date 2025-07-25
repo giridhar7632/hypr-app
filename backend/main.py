@@ -335,24 +335,26 @@ clients = set()
 async def broadcast_popular_quotes():
     while True:
         try:
-            from helpers import is_market_open
-            if is_market_open():
-                quotes = await fetch_popular_quotes(POPULAR_TICKERS)
-                await save_quotes_to_db(quotes)
-                logger.info("Broadcasting live quotes.")
+            if len(clients) > 0:
+                if is_market_open():
+                    quotes = await fetch_popular_quotes(POPULAR_TICKERS)
+                    await save_quotes_to_db(quotes)
+                    logger.info("Broadcasting live quotes.")
+                else:
+                    quotes = await fetch_cached_quotes_from_db()
+                    logger.info("Broadcasting cached quotes (market closed).")
+
+                disconnected = set()
+                for client in clients:
+                    try:
+                        await client.send_json({"type": "quotes", "data": quotes})
+                    except Exception as e:
+                        logger.warning(f"WebSocket client disconnected: {e}")
+                        disconnected.add(client)
+
+                clients.difference_update(disconnected)
             else:
-                quotes = await fetch_cached_quotes_from_db()
-                logger.info("Broadcasting cached quotes (market closed).")
-
-            disconnected = set()
-            for client in clients:
-                try:
-                    await client.send_json({"type": "quotes", "data": quotes})
-                except Exception as e:
-                    logger.warning(f"WebSocket client disconnected: {e}")
-                    disconnected.add(client)
-
-            clients.difference_update(disconnected)
+                logger.info("No WebSocket clients connected.")
         except Exception as e:
             logger.error(f"Error in quote broadcaster: {e}")
 
