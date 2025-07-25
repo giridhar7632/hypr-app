@@ -1,18 +1,21 @@
-import asyncio
-import json
-import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional
-import aiohttp
-import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI,Request, status, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import feedparser
-from transformers import pipeline
 import re
-import os
+import aiohttp, asyncio
+import logging
+import requests
+import finnhub
+import pandas as pd
+import yfinance as yf
+from transformers import pipeline
 from contextlib import asynccontextmanager
+from curl_cffi import requests as curl_requests
+from datetime import datetime, timedelta, timezone
+
+from helpers import *
+from config import settings
+from database import supabase
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -22,136 +25,189 @@ logger = logging.getLogger(__name__)
 PING_INTERVAL = 20
 
 # Global variables for model and data
+engine = None
+popular_quotes_task = None
 sentiment_analyzer = None
-all_news: List[dict] = []
-news_cache: List[dict] = []
-sentiment_history: Dict[str, List[dict]] = {}
-news_task: Optional[asyncio.Task] = None
+finnhub_client = finnhub.Client(settings.FINNHUB_API_KEY)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global sentiment_analyzer, news_task
     # Startup: load model
+    global sentiment_analyzer, popular_quotes_task
     logger.info("Loading sentiment analysis model...")
     sentiment_analyzer = pipeline(
         "sentiment-analysis",
         model="ProsusAI/finbert",
-        return_all_scores=True
+        top_k=None
     )
     logger.info("Model loaded successfully!")
+ 
+    popular_quotes_task = asyncio.create_task(broadcast_popular_quotes())
+    logger.info("Popular quotes task started successfully!")
 
-    # Start news collection background task
-    news_task = asyncio.create_task(news_collector_task())
-    logger.info("News collector task started")
-
-    yield
-
-    # Shutdown: cancel background task
-    logger.info("Shutting down...")
-    if news_task and not news_task.done():
-        news_task.cancel()
+    try:
+        yield
+    finally:
+        popular_quotes_task.cancel()
         try:
-            await news_task
+            await popular_quotes_task
         except asyncio.CancelledError:
-            logger.info("News collector task cancelled")
+            logger.info("popular_quotes_task cancelled successfully")
 
-app = FastAPI(title="Market Sentiment API", lifespan=lifespan)
+
+app = FastAPI(title="Hypr API", lifespan=lifespan)
 
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Data models
-class NewsItem(BaseModel):
-    title: str
-    summary: str
-    published: str
-    source: str
-    sentiment_score: float
-    sentiment_label: str
-    symbols: List[str]
 
-# WebSocket manager
-typing_dict = Optional[Dict]
-class WebSocketManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
+def get_company_info(ticker_symbol: str):
+    """
+    Get basic company info from the ticker symbol using Finnhub
+    """
+    profile = None
+    result = supabase.table("company_info").select("*").eq("ticker", ticker_symbol).execute()
 
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-        logger.info(f"WebSocket connected. Total connections: {len(self.active_connections)}")
+    if result.data:
+        profile = result.data[0]
+    else:
+        profile = finnhub_client.company_profile2(symbol=ticker_symbol)
 
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-        logger.info(f"WebSocket disconnected. Total connections: {len(self.active_connections)}")
+        if not profile or not profile.get("name"):
+            logger.error(f"No profile data found for {ticker_symbol}")
+            return {
+                "error": f"Invalid ticker symbol: {ticker_symbol}",
+                "name": ticker_symbol,
+                "ticker": ticker_symbol
+            }
 
-    async def broadcast(self, message: dict):
-        if not self.active_connections:
-            return
-        disconnected = []
-        text = json.dumps(message)
-        for ws in self.active_connections:
-            try:
-                await ws.send_text(text)
-            except Exception as e:
-                logger.error(f"Error sending message: {e}")
-                disconnected.append(ws)
-        for ws in disconnected:
-            if ws in self.active_connections:
-                self.active_connections.remove(ws)
+        supabase.table("company_info").insert(profile).execute()
+    
+    return {
+        "name": profile.get("name", ticker_symbol),
+        "ticker": profile.get("ticker", ticker_symbol),
+        "country": profile.get("country", "Unknown"),
+        "industry": profile.get("finnhubIndustry", "Unknown"),
+        "exchange": profile.get("exchange", "Unknown"),
+        "ipo": profile.get("ipo", "Unknown"),
+        "marketCap": float(profile.get("marketCapitalization", 0)),
+        "url": profile.get("weburl", "")
+    }
 
-manager = WebSocketManager()
+def get_financial_data(ticker_symbol, period="2mo", interval="1d"):
+    """
+    Fetching financial data of a company
+    """
+    try:
+        # Create a session with Chrome impersonation using curl_requests
+        session = curl_requests.Session(
+            impersonate="chrome110",
+            timeout=30,
+            verify=True
+        )
+        
+        # Configure headers to mimic a real browser
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Connection': 'keep-alive',
+        })
 
-# News sources and tracked symbols
-# RSS_FEEDS = {
-#     "MarketWatch": "https://feeds.marketwatch.com/marketwatch/topstories/",
-#     "Yahoo Finance": "https://feeds.finance.yahoo.com/rss/2.0/headline",
-#     "CNN Business": "http://rss.cnn.com/rss/money_latest.rss",
-#     "Bloomberg": "https://feeds.bloomberg.com/markets/news.rss"
-# }
-TRACKED_SYMBOLS = ["AAPL","GOOGL","MSFT","TSLA","AMZN","META","NVDA","SPY","QQQ"]
-def get_symbol_feeds(symbols: List[str]) -> Dict[str, str]:
-    base = "https://feeds.finance.yahoo.com/rss/2.0/headline?s={}&region=US&lang=en-US"
-    return {f"Yahoo Finance {sym}": base.format(sym) for sym in symbols}
+        print("DEBUG: Creating Ticker with session")
+        company = yf.Ticker(ticker_symbol, session=session)
+        
+        # Get company description
+        stock = yf.Ticker(ticker_symbol, session=session)
+        description = stock.info.get('longBusinessSummary', 'No description available')
+        
+        print("DEBUG: Fetching historical data")
+        # Use a longer period to ensure we have enough data
+        hist = company.history(period=period, interval=interval)
+        print("DEBUG: Historical data shape:", hist.shape)
+        # print("DEBUG: Historical data columns:", hist.columns)
+        # print("DEBUG: Historical data index:", hist.index)
+        # print("DEBUG: Historical data sample:", hist.head())
+        # print("DEBUG: Last 5 dates:", hist.index[-5:])
 
-RSS_FEEDS = {
-    # "Finviz": "https://finviz.com/feed.ashx",
-    # "Seeking Alpha": "https://seekingalpha.com/market_currents.xml"
-}
-RSS_FEEDS.update(get_symbol_feeds(TRACKED_SYMBOLS))
+        if hist.empty:
+            logger.error(f"No historical data found for {ticker_symbol}")
+            return {
+                "ticker": ticker_symbol,
+                "error": f"No historical data found for {ticker_symbol}"
+            }
 
-print('RSS_FEEDS', RSS_FEEDS)
+        # daily metrics
+        latest = hist.iloc[-1]
+        prev_day = hist.iloc[-2]
 
-# Utility functions
-def extract_symbols(text: str) -> List[str]:
-    symbols = re.findall(r"([A-Z]{4,5})", text)
-    words = text.upper().split()
-    for symbol in TRACKED_SYMBOLS:
-        if symbol in words:
-            symbols.append(symbol)
-    return list(set(symbols))
+        # calculating volatility (20-day std dev of return)
+        returns = hist['Close'].pct_change()
+        volatility = returns.std() * (256 ** 0.5) # annualized
+
+        historical_data = {}
+        for date, row in hist.iterrows():
+            if date.tzinfo is not None:
+                est_date = date.tz_convert('US/Eastern')
+            else:
+                est_date = date.tz_localize('UTC').tz_convert('US/Eastern')
+            
+            date_str = est_date.strftime('%Y-%m-%d')
+            historical_data[date_str] = {
+                'Open': float(row['Open']),
+                'High': float(row['High']),
+                'Low': float(row['Low']),
+                'Close': float(row['Close']),
+                'Volume': float(row['Volume'])
+            }
+
+        # print("DEBUG: Processed historical data keys:", list(historical_data.keys())[-5:])  # Show last 5 dates
+
+        data = {
+            "ticker": ticker_symbol,
+            "current_price": float(latest['Close']),
+            "opening_price": float(latest['Open']),
+            "daily_high": float(latest['High']),
+            "daily_low": float(latest['Low']),
+            "price_change": float(((latest["Close"] - prev_day['Close']) / prev_day['Close']) * 100),
+            "trading_volume": float(latest["Volume"]),
+            "volatility": float(volatility),
+            "historical_data": historical_data,
+            "description": description
+        }
+
+        # print("DEBUG: Financial data structure:", json.dumps(data, indent=2))
+        return data
+    except Exception as e:
+        import traceback
+        print(f"Error retrieving financial data: {e}")
+        print(f"Error type: {type(e)}")
+        print(f"Error details: {str(e)}")
+        print("Full traceback:")
+        print(traceback.format_exc())
+        return {
+            "ticker": ticker_symbol,
+            "error": f"Error retrieving financial data: {str(e)}"
+        }
 
 def analyze_sentiment(text: str) -> tuple:
     global sentiment_analyzer
     if not sentiment_analyzer:
-        return 0.0, "neutral", 0.5
+        return (0.0, "neutral", 0.5)
     clean_text = re.sub(r'http\S+', '', text)
     clean_text = re.sub(r'@\w+', '', clean_text).strip()
     if not clean_text:
         print('no clean text in ', text)
-        return 0.0, "neutral", 0.5
+        return (0.0, "neutral", 0.5)
     
-    # print('clean text', clean_text)
     results = sentiment_analyzer(clean_text[:512])
     scores = {item['label']: item['score'] for item in results[0]}
-    # print('scores', scores)
     pos = scores.get('positive', 0)
     neg = scores.get('negative', 0)
     neu = scores.get('neutral', 0)
@@ -163,175 +219,371 @@ def analyze_sentiment(text: str) -> tuple:
     else:
         label = 'neutral'
     confidence = max(pos, neg, neu)
-    return sentiment, label, confidence
 
-def generate_trading_signal(sentiment_score: float, confidence: float) -> str:
-    if confidence < 0.6:
-        return "HOLD"
-    if sentiment_score > 0.3:
-        return "BUY"
-    if sentiment_score < -0.3:
-        return "SELL"
-    return "HOLD"
+    return (sentiment, label, confidence)
 
-# Fetch and process news
-async def fetch_rss_news(session: aiohttp.ClientSession, name: str, url: str) -> List[dict]:
-    try:
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/114.0.0.0 Safari/537.36"
-            ),
-            "Accept": "application/rss+xml,application/xml;q=0.9,*/*;q=0.8",
-        }
-        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            content = await resp.text()
+def get_news_and_analyze(company_name,ticker_symbol=None, days=2, max_articles=20):
+    """
+    Scrape news articles from multiple sources and extract keywords
 
-        feed = feedparser.parse(content)
-        items = []
-        for entry in feed.entries[:10]:
-            title = entry.get('title', '')
-            summary = entry.get('summary', entry.get('description', ''))
-            published = entry.get('published', '')
-            full = f"{title} {summary}"
-            score, label, conf = analyze_sentiment(full)
-            # print("- - - - - - - - - - - -")
-            symbols = extract_symbols(full)
-            # print(full, " extracted ", score, label, conf, symbols)
-            items.append({
-                'title': title,
-                'summary': summary[:300] + '...' if len(summary) > 300 else summary,
-                'published': published,
-                'source': name,
-                'sentiment_score': round(score, 3),
-                'sentiment_label': label,
-                'confidence': round(conf, 3),
-                'symbols': symbols
-            })
-        return items
-    except Exception as e:
-        logger.error(f"Error fetching {name}: {e}")
+    Parameters:
+        ticker_symbol (str): Stock ticker for Finnhub API, defaults to None
+        days (int): Number of days to look back
+        max_articles (int): Maximum number of articles to process
+    """
+
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days)
+
+    from_date = start_date.strftime('%Y-%m-%d')
+    to_date = end_date.strftime('%Y-%m-%d')
+
+    articles_data = []
+
+    def process_article(article, articles_data):
+        """Helper function to process individual articles"""
+        try:
+            text_to_analyze = article.get("headline", "") + " " + article.get("summary", "")
+            sentiment, label, confidence = analyze_sentiment(text_to_analyze)
+            article_data = {
+                        "title":article.get("headline", ""),
+                        "description":article.get("summary", ""),
+                        "company_name":company_name,
+                        "ticker":ticker_symbol,
+                        "url":article.get("url", ""),
+                        "published_at": datetime.fromtimestamp(article.get("datetime", 0)).isoformat(),
+                        "source":article.get("source", "Finnhub"),
+                        "sentiment":sentiment,
+                        "label":label,
+                        "confidence":confidence,
+                    }
+
+            articles_data.append(article_data)
+
+        except Exception as e:
+            print(f"Error processing article {article.get('url')}: {e}")
+
+    if ticker_symbol:
+        try:
+            finnhub_news = finnhub_client.company_news(ticker_symbol, _from=from_date, to=to_date)
+            for article in finnhub_news[:max_articles]:
+                process_article(article, articles_data)
+
+        except Exception as e:
+            print(f"Error fetching news from Finnhub: {e}")
+
+    return { "articles": articles_data }
+
+def scrape_social_media(company_name: str, search_queries: List[str], max_results: int = 30):
+    all_posts = []
+    
+    # Get Reddit posts
+    reddit_posts = fetch_reddit_posts(company_name=company_name, search_queries=search_queries, analyze_sentiment=analyze_sentiment)
+    all_posts.extend(reddit_posts)
+    
+    # Get Bluesky posts
+    logger.info("Fetching Bluesky posts")
+    bluesky_posts = fetch_bluesky_posts(company_name=company_name, search_queries=search_queries, analyze_sentiment=analyze_sentiment, max_results=max_results)
+    all_posts.extend(bluesky_posts)
+    logger.info(f"Total Bluesky posts collected: {len(all_posts)}")
+    
+    if not all_posts:
         return []
-
-async def collect_news():
-    global all_news, news_cache, sentiment_history
-    connector = aiohttp.TCPConnector(limit=10)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        tasks = [fetch_rss_news(session, n, u) for n, u in RSS_FEEDS.items()]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for res in results:
-            if isinstance(res, list): all_news.extend(res)
-        if not all_news:
-            return
-        news_cache = all_news[-50:]
-        symbol_map: Dict[str, List[dict]] = {}
-        for news in all_news:
-            for sym in news['symbols']:
-                symbol_map.setdefault(sym, []).append({
-                    'sentiment': news['sentiment_score'],
-                    'confidence': news['confidence']
-                })
-        now = datetime.now().isoformat()
-        updates = []
-        for sym in TRACKED_SYMBOLS:
-            lst = symbol_map.get(sym, [])
-            if lst:
-                wsum = sum(x['sentiment'] * x['confidence'] for x in lst)
-                total = sum(x['confidence'] for x in lst)
-                avg = wsum / total if total else 0.0
-                avg_conf = sum(x['confidence'] for x in lst) / len(lst)
-            else:
-                avg, avg_conf = 0.0, 0.5
-            sig = generate_trading_signal(avg, avg_conf)
-            data = {
-                'symbol': sym,
-                'sentiment': round(avg, 3),
-                'timestamp': now,
-                'signal': sig,
-                'confidence': round(avg_conf, 3)
-            }
-            sentiment_history.setdefault(sym, []).append(data)
-            sentiment_history[sym] = sentiment_history[sym][-100:]
-            updates.append(data)
-        await manager.broadcast({'type': 'sentiment_update', 'data': updates})
-        await manager.broadcast({'type': 'news_update', 'data': all_news})
-        logger.info(f"Processed {len(all_news)} news items, {len(updates)} sentiment updates")
-
-async def news_collector_task():
-    try:
-        while True:
-            await collect_news()
-            await asyncio.sleep(300)
-    except asyncio.CancelledError:
-        logger.info("News collector task cancelled")
-    except Exception as e:
-        logger.error(f"News collector task error: {e}")
-        await asyncio.sleep(60)
-
-# HTTP Routes
-@app.get("/")
-async def root():
-    return {"message": "Market Sentiment API", "status": "running"}
-
-@app.get("/health")
-async def health_check():
+    
+    # Calculate metrics
+    sentiments = [post["sentiment"] for post in all_posts]
+    avg_sentiment = sum(sentiments) / len(sentiments)
+    
+    # Get top posts by engagement
+    top_posts = sorted(all_posts, key=lambda x: x["engagement"], reverse=True)[:10]
+    
     return {
-        "status": "healthy",
-        "news_items": len(news_cache),
-        "tracked_symbols": len(TRACKED_SYMBOLS),
-        "model_loaded": sentiment_analyzer is not None
+        "posts":all_posts,
+        "top_posts":top_posts,
+        "total_posts":len(all_posts),
+        "avg_sentiment":avg_sentiment
     }
 
-@app.get("/news", response_model=List[NewsItem])
-async def get_recent_news():
-    return news_cache[-20:]
+def get_alpha_vantage_trending():
 
-@app.get("/sentiment/{symbol}")
-async def get_symbol_sentiment(symbol: str):
-    sym = symbol.upper()
-    if sym not in sentiment_history:
-        raise HTTPException(status_code=404, detail="Symbol not found")
-    return {"symbol": sym, "history": sentiment_history[sym][-50:], "current": sentiment_history[sym][-1]}
-
-@app.get("/sentiment")
-async def get_all_sentiment():
-    return {s: sentiment_history[s][-1] for s in TRACKED_SYMBOLS if sentiment_history.get(s)}
-
-# Heartbeat helper
-async def heartbeat(ws: WebSocket):
     try:
-        while True:
-            await asyncio.sleep(PING_INTERVAL)
-            await ws.send_text(json.dumps({"type": "ping"}))
-    except Exception:
-        return
+        result = supabase.table("trending_stocks").select("*").execute()
+        if result.data and result.data[0]:
+            last_updated = datetime.fromisoformat(result.data[0]["last_updated"])
+            now_utc = datetime.now(timezone.utc)
 
-# WebSocket endpoint with server-side heartbeat
-@app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    await manager.connect(ws)
-    hb_task = asyncio.create_task(heartbeat(ws))
-    try:
-        await ws.send_text(json.dumps({
-            'type': 'initial_data',
-            'news': all_news,
-            'sentiment': {sym: sentiment_history.get(sym, [None])[-1] for sym in TRACKED_SYMBOLS}
-        }))
-        while True:
-            await ws.receive_text()
-    except WebSocketDisconnect:
-        manager.disconnect(ws)
+            if last_updated < now_utc - timedelta(days=1):
+                data = fetch_alpha_vantage_trending()
+                supabase.table("trending_stocks").insert(data).execute()
+                return data
+            else:
+                return result.data[0]
+
+        else:
+            data = fetch_alpha_vantage_trending()
+            supabase.table("trending_stocks").insert(data).execute()
+            return data
+        
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-        manager.disconnect(ws)
-    finally:
-        hb_task.cancel()
+        print(f"Error with Alpha Vantage: {e}")
+        return []
 
-if __name__ == "__main__":
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 8000)),
-        log_level="info"
+clients = set()
+POPULAR_TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META"]
+async def fetch_quote(session, symbol):
+    url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={settings.FINNHUB_API_KEY}"
+    async with session.get(url) as resp:
+        data = await resp.json()
+        return {
+            "ticker": symbol,
+            "price": data.get("c"),
+            "change_amount": data.get("d"),
+            "change_percentage": data.get("dp"),
+        }
+
+async def fetch_popular_quotes(symbols):
+    async with aiohttp.ClientSession() as session:
+        tasks = [fetch_quote(session, symbol) for symbol in symbols]
+        quotes = await asyncio.gather(*tasks)
+        return quotes
+        
+def save_quotes_to_db(quotes):
+    now = datetime.utcnow().isoformat()
+    for q in quotes:
+        q["updated_at"] = now
+    supabase.table("live_quotes").upsert(quotes).execute()
+
+def fetch_cached_quotes_from_db():
+    result = supabase.table("live_quotes").select("*").order("updated_at", desc=True).limit(10).execute()
+    return result.data if result.data else []
+
+async def broadcast_popular_quotes():
+    while True:
+        try:
+            if is_market_open():
+                quotes = await fetch_popular_quotes(POPULAR_TICKERS)
+                save_quotes_to_db(quotes)
+                logger.info("Broadcasting live quotes.")
+            else:
+                quotes = fetch_cached_quotes_from_db()
+                logger.info("Broadcasting cached quotes (market closed).")
+
+            disconnected = set()
+            for client in clients:
+                try:
+                    await client.send_json({"type": "quotes", "data": quotes})
+                except Exception:
+                    disconnected.add(client)
+
+            for client in disconnected:
+                clients.remove(client)
+
+        except Exception as e:
+            logger.error(f"Error in quote broadcaster: {e}")
+
+        await asyncio.sleep(15)
+
+
+@app.websocket("/ws/popular")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    clients.add(websocket)
+    logger.info(f"WebSocket connection accepted: {len(clients)}")
+
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        clients.remove(websocket)
+
+@app.get('/popular')
+async def get_popular_quotes():
+    if is_market_open():
+        quotes = await fetch_popular_quotes(POPULAR_TICKERS)
+        save_quotes_to_db(quotes)
+        logger.info("Broadcasting live quotes.")
+    else:
+        quotes = fetch_cached_quotes_from_db()
+        logger.info("Broadcasting cached quotes (market closed).")
+    return quotes
+
+@app.post('/analyze')
+def analyze(data: AnalyzeItem):
+    """Analyze stock endpoint with SSE support"""
+    if not data:
+        logger.error("No JSON data received in request")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No JSON data received"
+        )
+    print(data)
+    ticker = data.symbol.upper()
+    if not ticker:
+        logger.error("No symbol provided in request")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No symbol provided"
+        )
+
+    force_refresh = data.force_refresh
+    logger.info(f"Starting analysis for {ticker} (force_refresh={force_refresh})")
+
+    def generate():
+        try:
+            # Check cache first
+            now_utc = datetime.now(timezone.utc)
+            logger.info(f"Current UTC time: {now_utc.isoformat()}")
+            
+            # Debug: Print the SQL query            
+            result = supabase.table("data").select("last_run").contains("company_info", {"ticker": ticker}).order("last_run", desc=True).limit(1).execute()
+            logger.info(f"Cache check result: {result}")
+
+            # If force refresh is requested, skip cache check and run pipeline
+            if force_refresh:
+                logger.info("Force refresh requested, running pipeline")
+                yield send_sse_message({"step": "cache", "status": "info", "message": "Force refresh requested, running pipeline"})
+            elif result and result.data and result.data[0]:
+                logger.info(f"Found cache entry with last_run: {result.data[0]}")
+                
+                # Check if cache is still valid (less than 1 hour old)
+                cache_age = now_utc - datetime.fromisoformat(result.data[0]["last_run"])
+                cache_age_hours = cache_age.total_seconds() / 3600
+                logger.info(f"Current time (UTC): {now_utc.isoformat()}")
+                logger.info(f"Last run time (UTC): {result.data[0]["last_run"]}")
+                logger.info(f"Cache age: {cache_age_hours:.2f} hours")
+                
+                if cache_age < timedelta(hours=1):
+                    logger.info(f"Using cached data (age: {cache_age_hours:.2f} hours)")
+                    yield send_sse_message({"step": "cache", "status": "success", "message": f"Using cached data (age: {cache_age_hours:.2f} hours)"})
+                        
+                    # Debug: Print the data query
+                    recent_data = supabase.table("data").select("*").eq("ticker", ticker).order("last_run", desc=True).limit(1).execute()
+                    logger.info(f"Found cached data: {bool(recent_data)}")
+
+                    if recent_data.data and recent_data.data[0]:
+                        logger.info("Successfully reconstructed cached data")
+                        yield send_sse_message({"step": "complete", "status": "success", "data": recent_data.data[0]})
+                        return
+                    else:
+                        logger.info("No cached data found in database")
+                        yield send_sse_message({"step": "cache", "status": "error", "message": "No cached data found"})
+                else:
+                    logger.info(f"Cache expired (age: {cache_age_hours:.2f} hours), running pipeline")
+                    yield send_sse_message({"step": "cache", "status": "info", "message": f"Cache expired (age: {cache_age_hours:.2f} hours), running pipeline"})
+            else:
+                logger.info("No cache found, running pipeline")
+                yield send_sse_message({"step": "cache", "status": "info", "message": "No cache found, running pipeline"})
+
+            # Only run pipeline if cache is expired or no cache exists
+            if force_refresh or not result or not result[0] or cache_age >= timedelta(hours=1):
+                # Step 1: Financial data
+                logger.info("Starting company info fetch")
+                yield send_sse_message({"step": "company_info", "status": "started", "message": "Fetching company info"})
+                company_info = get_company_info(ticker)
+                
+                if "error" in company_info:
+                    logger.error(f"Error in company info: {company_info['error']}")
+                    yield send_sse_message({"step": "company_info", "status": "error", "message": company_info["error"]})
+                    return
+
+                logger.info(f"Got company info for {company_info['name']}")
+                yield send_sse_message({"step": "company_info", "status": "success", "message": f"Got data for {company_info['name']}"})
+
+                # Step 2: Get financial data
+                logger.info("Starting financial data fetch")
+                yield send_sse_message({"step": "financial_data", "status": "started", "message": "Fetching financial data"})
+                financial_data = get_financial_data(ticker, period="1mo")
+                
+                if "error" in financial_data:
+                    logger.error(f"Error in financial data: {financial_data['error']}")
+                    yield send_sse_message({"step": "financial_data", "status": "error", "message": financial_data["error"]})
+                    return
+                    
+                logger.info("Got financial data")
+                yield send_sse_message({"step": "financial_data", "status": "success", "message": "Got financial data"})
+
+                # Step 3: News data
+                logger.info("Starting news analysis")
+                yield send_sse_message({"step": "news", "status": "started", "message": "Analyzing news"})
+                news_data = get_news_and_analyze(company_name=company_info['name'], ticker_symbol=ticker, days=2)
+                logger.info(f"Found {len(news_data['articles'])} articles")
+                yield send_sse_message({"step": "news", "status": "success", "message": f"Found {len(news_data['articles'])} articles"})
+
+                # Step 4: Expand keywords with AI
+                logger.info("Starting keyword expansion")
+                yield send_sse_message({"step": "keywords", "status": "started", "message": "Expanding keywords"})
+                expanded_data = expand_keywords_and_generate_queries(company_info['name'], company_info.get('industry', 'N/A'))
+                logger.info("Generated search queries")
+                yield send_sse_message({"step": "keywords", "status": "success", "message": "Generated search queries"})
+
+                # Step 5: Scraping social media
+                logger.info("Starting social media analysis")
+                yield send_sse_message({"step": "social", "status": "started", "message": "Analyzing social media"})
+                social_data = scrape_social_media(company_name=company_info['name'], search_queries=expanded_data['search_queries'])
+                logger.info(f"Analyzed {social_data['total_posts']} posts")
+                yield send_sse_message({"step": "social", "status": "success", "message": f"Analyzed {social_data['total_posts']} posts"})
+
+                # Step 6: Calculate metrics
+                logger.info("Starting metrics calculation")
+                yield send_sse_message({"step": "metrics", "status": "started", "message": "Calculating metrics"})
+                scores = calculate_metrics(financial_data, news_data, social_data)
+                logger.info("Calculated all scores")
+                yield send_sse_message({"step": "metrics", "status": "success", "message": "Calculated all scores"})
+
+                # Prepare the response structure
+                res = {
+                    "ticker": ticker,
+                    "company_info": company_info,
+                    "financial_data": financial_data,
+                    "news_data": news_data,
+                    "expanded_data": expanded_data,
+                    "social_data": social_data,
+                    "scores": scores,
+                    "last_run": now_utc.isoformat()
+                }
+
+                try:
+                    supabase.table("data").insert(res).execute()
+                    yield send_sse_message({"step": "complete", "status": "success", "data": res})
+                except Exception as e:
+                    error_msg = f"Error in data processing: {str(e)}"
+                    logger.error(error_msg)
+                    yield send_sse_message({"step": "complete", "status": "error", "message": error_msg})
+                    raise
+
+        except Exception as e:
+            error_msg = f"Error in pipeline: {str(e)}"
+            logger.error(error_msg)
+            yield send_sse_message({"step": "complete", "status": "error", "message": error_msg})
+            raise
+
+    return StreamingResponse(
+        generate(),
+        media_type='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        }
     )
+
+@app.get("/company/{ticker}")
+def get_company(ticker: str):
+    return get_company_info(ticker)
+
+@app.get("/financial/{ticker_symbol}")
+def get_financial_data_route(ticker_symbol: str):
+    return get_financial_data(ticker_symbol)
+
+@app.get("/news/{ticker}")
+def get_news_and_analyze_route(ticker: str):
+    return get_news_and_analyze(company_name=ticker, ticker_symbol=ticker)
+
+@app.get("/trending")
+def get_alpha_vantage_trending_route():
+    return get_alpha_vantage_trending()
+
+# WebSocket manager
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
