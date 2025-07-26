@@ -9,7 +9,7 @@ import logging
 import re
 from transformers import pipeline
 from typing import List, AsyncGenerator, Optional
-
+import torch
 from database import _select, _insert, _upsert
 from config import settings
 from helpers import *
@@ -31,7 +31,12 @@ async def lifespan(app: FastAPI):
 
     global sentiment_analyzer, popular_quotes_task
     logger.info("Loading sentiment analysis model...")
-    sentiment_analyzer = pipeline("sentiment-analysis", model="ProsusAI/finbert", top_k=None)
+    sentiment_analyzer = pipeline(
+        "sentiment-analysis",
+        model="mrm8488/distilroberta-finetuned-financial-news-sentiment-analysis",
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        top_k=None
+    )
     logger.info("Model loaded successfully!")
 
     app.state.aiohttp_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
