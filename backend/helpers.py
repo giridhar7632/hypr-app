@@ -28,21 +28,20 @@ def json_serial(obj):
 def send_sse_message(message, event_type="message"):
     return f"event: {event_type}\ndata: {json.dumps(message, default=json_serial)}\n\n"
 
-async def fetch_alpha_vantage_trending():
+async def fetch_alpha_vantage_trending(session):
     url = f"https://www.alphavantage.co/query?function=TOP_GAINERS_LOSERS&apikey={settings.ALPHA_VANTAGE_API_KEY}"
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                if response.status != 200:
-                    print(f"Alpha Vantage API returned status {response.status}")
-                    return {"top_gainers": [], "top_losers": [], "most_actively_traded": []}
-                data = await response.json()
+        async with session.get(url) as response:
+            if response.status != 200:
+                print(f"Alpha Vantage API returned status {response.status}")
+                return {"top_gainers": [], "top_losers": [], "most_actively_traded": []}
+            data = await response.json()
 
-                for k in ("top_gainers", "top_losers", "most_actively_traded"):
-                    data[k] = data.get(k, [])[:5]
+            for k in ("top_gainers", "top_losers", "most_actively_traded"):
+                data[k] = data.get(k, [])[:5]
 
-                data.pop("metadata", None)
-                return data
+            del data["metadata"]
+            return data
     except Exception as e:
         print(f"Error fetching Alpha Vantage trending: {e}")
         return {"top_gainers": [], "top_losers": [], "most_actively_traded": []}
@@ -166,48 +165,91 @@ def fetch_bluesky_posts(company_name: str, search_queries: List[str], analyze_se
         print(f"Bluesky auth failed: {e}")
         return []
 
-def calculate_metrics(financial_data: Dict, news_data: Dict, social_data: Dict):
+def calculate_metrics(
+    financial_data: Dict[str, Any],
+    news_data: Dict[str, Any],
+    social_data: Dict[str, Any]
+) -> Dict[str, Any]:
     scores = {}
+
+    # Financial Momentum (price, volume, volatility)
     try:
         hist_df = pd.DataFrame.from_dict(financial_data["historical_data"], orient="index")
         hist_df.index = pd.to_datetime(hist_df.index)
         hist_df = hist_df.sort_index()
+
         price_change_5d = hist_df['Close'].pct_change(5).iloc[-1] * 100
         price_change_20d = hist_df['Close'].pct_change(20).iloc[-1] * 100
         volume_ratio = hist_df['Volume'].iloc[-1] / max(hist_df['Volume'].iloc[-20:].mean(), 1)
-        volatility = financial_data.get("volatility", 0.01)
-        volatility_score = min(50, (1/max(volatility, 0.001)) * 10)
-        fm = min(100, max(0, price_change_5d*3 + price_change_20d*2 + volume_ratio*10 + volatility_score))
+
+        # Real-world volatility (annualized std dev of daily returns)
+        returns = hist_df['Close'].pct_change().dropna()
+        volatility = returns.std() * np.sqrt(252)
+        volatility_score = min(50, (1/max(volatility, 1e-4)) * 10)
+
+        fm = min(100, max(0, price_change_5d * 3 + price_change_20d * 2 + volume_ratio * 10 + volatility_score))
         scores["financial_momentum"] = fm
     except Exception as e:
-        print(f"Financial momentum error: {e}"); scores["financial_momentum"] = 50
+        print(f"Financial momentum error: {e}")
+        scores["financial_momentum"] = 50
+
+    # News Sentiment and Confidence (weighted by article confidence)
     try:
-        arts = news_data.get("articles", [])
-        if arts:
-            avg_sent = sum(a["sentiment"] for a in arts) / len(arts)
-            news_sentiment = (avg_sent + 1) * 50
-            count_factor = min(1.5, max(0.5, len(arts)/10))
-            scores["news_sentiment"] = min(100, max(0, news_sentiment*count_factor))
+        articles = news_data.get("articles", [])
+        if articles:
+            sentiments = [a.get("sentiment", 0) for a in articles]
+            confidences = [a.get("confidence", 0.5) for a in articles]
+            if confidences and sum(confidences) > 0:
+                avg_sent = float(np.average(sentiments, weights=confidences))
+                avg_confidence = float(np.mean(confidences))
+            else:
+                avg_sent = float(np.mean(sentiments)) if sentiments else 0.0
+                avg_confidence = 0.5
+            news_sentiment = (avg_sent + 1) * 50  # normalize -1~1 → 0~100
+            article_count_factor = min(1.5, max(0.5, len(articles) / 10))
+            news_sentiment = min(100, max(0, news_sentiment * article_count_factor))
+            scores["news_sentiment"] = news_sentiment
+            scores["news_confidence"] = avg_confidence
         else:
             scores["news_sentiment"] = 50
+            scores["news_confidence"] = 0.5
     except Exception as e:
-        print(f"News sentiment error: {e}"); scores["news_sentiment"] = 50
+        print(f"News sentiment error: {e}")
+        scores["news_sentiment"] = 50
+        scores["news_confidence"] = 0.5
+
+    # Social Buzz, Sentiment, and Confidence
     try:
         posts = social_data.get("posts", [])
         if posts:
-            soc_sent = (social_data["avg_sentiment"] + 1) * 50
-            post_vol = min(2.0, max(0.5, social_data["total_posts"]/50))
+            social_sentiments = [p.get("sentiment", 0) for p in posts]
+            social_confidences = [p.get("confidence", 0.5) for p in posts]
+            avg_social_sentiment = float(np.average(social_sentiments, weights=social_confidences)) if social_confidences and sum(social_confidences) > 0 else float(np.mean(social_sentiments)) if social_sentiments else 0.0
+            avg_social_confidence = float(np.mean(social_confidences)) if social_confidences else 0.5
+            post_vol = min(2.0, max(0.5, social_data.get("total_posts", 0) / 50))
             now = datetime.now(timezone.utc)
-            recents = [p for p in posts if isinstance(p.get("created_at"), (datetime, np.datetime64))
-                and parse_timestamp(p["created_at"]) > now - timedelta(hours=24)]
-            recency = min(1.5, max(0.5, len(recents)/max(1,len(posts))*3))
-            avg_eng = sum(p.get("engagement",0) for p in posts) / max(1,len(posts))
-            eng_factor = min(2.0, max(0.5, avg_eng/10))
-            social_buzz = min(100, max(0, soc_sent*post_vol*recency*eng_factor))
+            recent_posts = [
+                p for p in posts
+                if isinstance(p.get("created_at"), (datetime, pd.Timestamp, np.datetime64))
+                and pd.to_datetime(p["created_at"]).replace(tzinfo=timezone.utc) > (now - timedelta(hours=24))
+            ]
+            recency_factor = min(1.5, max(0.5, len(recent_posts) / max(1, len(posts)) * 3))
+            avg_engagement = np.mean([p.get("engagement", 0) for p in posts]) if posts else 0
+            eng_factor = min(2.0, max(0.5, avg_engagement / 10))
+
+            social_buzz_raw = avg_social_sentiment * post_vol * recency_factor * eng_factor
+            social_buzz = min(100, max(0, (social_buzz_raw + 1) * 50))  # normalize
             scores["social_buzz"] = social_buzz
-        else: scores["social_buzz"] = 0
+            scores["social_confidence"] = avg_social_confidence
+        else:
+            scores["social_buzz"] = 0
+            scores["social_confidence"] = 0.5
     except Exception as e:
-        print(f"Social buzz error: {e}"); scores["social_buzz"] = 0
+        print(f"Social buzz error: {e}")
+        scores["social_buzz"] = 0
+        scores["social_confidence"] = 0.5
+
+    # Hype Index (weighted composite)
     try:
         scores["hype_index"] = (
             scores["financial_momentum"] * 0.6 +
@@ -215,21 +257,41 @@ def calculate_metrics(financial_data: Dict, news_data: Dict, social_data: Dict):
             scores["social_buzz"] * 0.2
         )
     except Exception as e:
-        print(f"Hype index error: {e}"); scores["hype_index"] = 50
+        print(f"Hype index error: {e}")
+        scores["hype_index"] = 50
+
+    # Sentiment-Price Divergence
     try:
         price_change_3d = hist_df['Close'].pct_change(3).iloc[-1] * 100
-        combined_sentiment = (scores["news_sentiment"] + scores["social_buzz"])/2
-        norm_price = min(100, max(0, (price_change_3d+10)*5))
+        combined_sentiment = (scores["news_sentiment"] + scores["social_buzz"]) / 2
+        norm_price = min(100, max(0, (price_change_3d + 10) * 5))
         scores["sentiment_price_divergence"] = norm_price - combined_sentiment
     except Exception as e:
-        print(f"Sentiment-price divergence error: {e}"); scores["sentiment_price_divergence"] = 0
+        print(f"Sentiment-price divergence error: {e}")
+        scores["sentiment_price_divergence"] = 0
+
+    scores["trading_signal"] = generate_trading_signal(financial_momentum=scores.get("financial_momentum", 50),news_sentiment=scores.get("news_sentiment", 50),news_confidence=scores.get("news_confidence", 0.5),social_buzz=scores.get("social_buzz", 0),social_confidence=scores.get("social_confidence", 0.5),sentiment_price_divergence=scores.get("sentiment_price_divergence", 0),threshold_confidence=0.6,positive_threshold=60,negative_threshold=40)
+
     return scores
 
-def generate_trading_signal(sentiment_score: float, confidence: float) -> str:
-    if confidence < 0.6: return "HOLD"
-    if sentiment_score >= 0.4: return "BUY"
-    if sentiment_score <= -0.4: return "SELL"
-    return "HOLD"
+def generate_trading_signal(financial_momentum: float,news_sentiment: float,news_confidence: float,social_buzz: float,social_confidence: float,sentiment_price_divergence: float,threshold_confidence: float = 0.6,positive_threshold: float = 60,negative_threshold: float = 40) -> str:
+    # Weighted composite sentiment/score
+    composite_sentiment = (
+        financial_momentum * 0.6 +
+        news_sentiment * 0.2 * news_confidence +
+        social_buzz * 0.2 * social_confidence
+    )
+    combined_confidence = (news_confidence + social_confidence + 1.0) / 3.0
+
+    if combined_confidence < threshold_confidence:
+        return "HOLD"
+    if composite_sentiment >= positive_threshold and sentiment_price_divergence < 0:
+        return "BUY"
+    elif composite_sentiment <= negative_threshold and sentiment_price_divergence > 0:
+        return "SELL"
+    else:
+        return "HOLD"
+
 
 def flatten_nested_dict(d, parent_key='', sep='.'):
     items = []

@@ -26,6 +26,9 @@ sentiment_analyzer = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: load model
+    import os
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
     global sentiment_analyzer, popular_quotes_task
     logger.info("Loading sentiment analysis model...")
     sentiment_analyzer = pipeline("sentiment-analysis", model="ProsusAI/finbert", top_k=None)
@@ -91,7 +94,7 @@ async def get_company_info(ticker_symbol: str):
             "ticker": ticker_symbol
         }
     # Save to DB
-    await _insert("company_info", profile)
+    await _upsert("company_info", profile)
     return {
         "name": profile.get("name", ticker_symbol),
         "ticker": profile.get("ticker", ticker_symbol),
@@ -230,15 +233,13 @@ async def get_news_and_analyze(company_name: str, ticker_symbol: Optional[str] =
 
         total_weight = sum(a["confidence"] for a in articles_data if a["confidence"] > 0)
         if total_weight == 0:
-            return {"articles": articles_data, "avg_sentiment": 0, "signal": "HOLD"}
+            return {"articles": articles_data, "avg_sentiment": 0}
 
         weighted_sentiment = sum(a["sentiment"] * a["confidence"] for a in articles_data) / total_weight
-        avg_confidence = sum(a["confidence"] for a in articles_data) / len(articles_data)
-
-        return {"articles": articles_data, "avg_sentiment": weighted_sentiment, "signal": generate_trading_signal(weighted_sentiment, avg_confidence)}
+        return {"articles": articles_data, "avg_sentiment": weighted_sentiment}
     except Exception as e:
         logger.error(f"Error fetching news: {e}")
-        return {"articles": [], "avg_sentiment": 0, "signal": "HOLD"}
+        return {"articles": [], "avg_sentiment": 0}
 
 async def scrape_social_media(company_name: str, search_queries: List[str], max_results=30):
     loop = asyncio.get_event_loop()
@@ -276,7 +277,7 @@ async def get_alpha_vantage_trending():
             now_utc = datetime.now(timezone.utc)
 
             if last_updated < now_utc - timedelta(days=1):
-                data = await fetch_alpha_vantage_trending()
+                data = await fetch_alpha_vantage_trending(app.state.aiohttp_session)
                 await _upsert("trending_stocks", data)
                 return data
             else:
@@ -414,7 +415,7 @@ async def analyze(data: AnalyzeItem):
                     return
                 else:
                     yield send_sse_message(
-                        {"step": "cache", "status": "error", "message": "Cache expired. Re-running analysis.", "data": cache_result.data[0]}
+                        {"step": "cache", "status": "warning", "message": "Cache expired. Re-running analysis.", "data": cache_result.data[0]}
                     )
 
             # step 1: company info
@@ -424,7 +425,7 @@ async def analyze(data: AnalyzeItem):
                 yield send_sse_message({"step": "company_info", "status": "error", "message": company_info["error"]})
                 return
 
-            yield send_sse_message({"step": "company_info", "status": "success", "message": f"Got company info for {company_info['name']}", "data": company_info})
+            yield send_sse_message({"step": "company_info", "status": "success", "message": f"Got company info for {company_info['name']}"})
 
             # step 2: financial data
             yield send_sse_message({"step": "financial_data", "status": "started", "message": "Fetching financial data"})
@@ -433,12 +434,12 @@ async def analyze(data: AnalyzeItem):
                 yield send_sse_message({"step": "financial_data", "status": "error", "message": financial_data["error"]})
                 return
 
-            yield send_sse_message({"step": "financial_data", "status": "success", "message": "Got financial data", "data": financial_data})
+            yield send_sse_message({"step": "financial_data", "status": "success", "message": "Got financial data"})
 
             # step 3: news and analyze
             yield send_sse_message({"step": "news", "status": "started", "message": "Analyzing news"})
             news_data = await get_news_and_analyze(company_info["name"], ticker_symbol=ticker)
-            yield send_sse_message({"step": "news", "status": "success", "message": f"Found {len(news_data['articles'])} articles", "data": news_data})
+            yield send_sse_message({"step": "news", "status": "success", "message": f"Found {len(news_data['articles'])} articles"})
 
             # step 4: expand keywords and generate queries
             yield send_sse_message({"step": "keywords", "status": "started", "message": "Expanding keywords"})
@@ -448,12 +449,12 @@ async def analyze(data: AnalyzeItem):
             # step 5: scrape social media
             yield send_sse_message({"step": "social", "status": "started", "message": "Analyzing social media"})
             social_data = await scrape_social_media(company_name=company_info['name'], search_queries=expanded_data['search_queries'])
-            yield send_sse_message({"step": "social", "status": "success", "message": f"Analyzed {social_data['total_posts']} posts", "data": social_data})
+            yield send_sse_message({"step": "social", "status": "success", "message": f"Analyzed {social_data['total_posts']} posts"})
 
             # step 6: calculate metrics
             yield send_sse_message({"step": "calculate", "status": "started", "message": "Calculating metrics"})
             scores = calculate_metrics(financial_data, news_data, social_data)
-            yield send_sse_message({"step": "calculate", "status": "success", "message": "Calculated metrics", "data": scores})
+            yield send_sse_message({"step": "calculate", "status": "success", "message": "Calculated metrics"})
 
             # step 7: save to db
             result = {
@@ -468,11 +469,11 @@ async def analyze(data: AnalyzeItem):
             }
 
             await _insert("data", result)
-            yield send_sse_message({"step": "complete", "status": "success"})
+            yield send_sse_message({"step": "complete", "status": "success", "data": result})
 
         except Exception as e:
             logger.error(f"Error in /analyze pipeline: {e}", exc_info=True)
-            yield send_sse_message({"step": "complete", "status": "error", "message": str(e)})
+            yield send_sse_message({"step": "complete", "status": "error", "message": str(e), "data": None})
 
     return StreamingResponse(
         generate(),

@@ -5,6 +5,9 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+export const formatMillionsToReadable = (value: number): string => 
+    value >= 1000 ? `${(value / 1000000).toFixed(2)} Trillion` : `${value.toFixed(2)} Million`;
+
 export const fetchData = async (url: string) => {
     const response = await fetch(url);
     if (!response.ok) {

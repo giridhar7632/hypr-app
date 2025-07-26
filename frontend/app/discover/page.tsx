@@ -110,40 +110,40 @@ export default function Discover() {
             <ol className="flex flex-col w-screen gap-8 items-center justify-center mt-16">
                 {isTrendingLoading ? Array.from({ length: 4 }).map((_, index) => (
                     <SkeletonCard key={index} />
-                )) : trending?.top_gainers?.map((item: any, index: number) => (
+                )) : trending?.top_gainers.length > 0 ? trending?.top_gainers?.map((item: any, index: number) => (
                     <li key={index} className="w-full"><a onClick={(e) => {
                                     e.preventDefault()
                                     router.push(`/company/${item.ticker}`, {
                                         onTransitionReady: slideInOut
                                     })
                                 }} href={`/company/${item.ticker}`}><Card {...item} delay={false} /></a></li>
-                ))} 
+                )) : <p className="text-neutral-500 text-[2vw]">No data available</p>} 
             </ol>
             <h2 className="text-[4vw] font-bold tracking-tight leading-tight whitespace-nowrap mt-16">Top Losers</h2>
             <ol className="flex flex-col w-screen gap-8 items-center justify-center mt-16">
                 {isTrendingLoading ? Array.from({ length: 4 }).map((_, index) => (
                     <SkeletonCard key={index} />
-                )) : trending?.top_losers?.map((item: any, index: number) => (
+                )) : trending?.top_losers.length > 0 ? trending?.top_losers?.map((item: any, index: number) => (
                     <li key={index} className="w-full"><a onClick={(e) => {
                                     e.preventDefault()
                                     router.push(`/company/${item.ticker}`, {
                                         onTransitionReady: slideInOut
                                     })
                                 }} href={`/company/${item.ticker}`}><Card {...item} delay={false} /></a></li>
-                ))} 
+                )) : <p className="text-neutral-500 text-[2vw]">No data available</p>}
             </ol>
             <h2 className="text-[4vw] font-bold tracking-tight leading-tight whitespace-nowrap mt-16">Most Activly Traded</h2>
             <ol className="flex flex-col w-screen gap-8 items-center justify-center mt-16">
                 {isTrendingLoading ? Array.from({ length: 4 }).map((_, index) => (
                     <SkeletonCard key={index} />
-                )) : trending?.most_actively_traded?.map((item: any, index: number) => (
+                )) : trending?.most_actively_traded.length > 0 ? trending?.most_actively_traded?.map((item: any, index: number) => (
                     <li key={index} className="w-full"><a onClick={(e) => {
                                     e.preventDefault()
                                     router.push(`/company/${item.ticker}`, {
                                         onTransitionReady: slideInOut
                                     })
                                 }} href={`/company/${item.ticker}`}><Card {...item} delay={false} /></a></li>
-                ))} 
+                )) : <p className="text-neutral-500 text-[2vw]">No data available</p>} 
             </ol>
 
         </div>
