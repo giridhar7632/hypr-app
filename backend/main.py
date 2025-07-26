@@ -502,6 +502,10 @@ async def get_news_and_analyze_route(ticker: str):
 async def get_alpha_vantage_trending_route():
     return await get_alpha_vantage_trending()
 
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
 if __name__ == "__main__":
     import uvicorn
 
