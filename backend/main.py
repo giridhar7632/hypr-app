@@ -467,8 +467,8 @@ async def analyze(data: AnalyzeItem):
                 "scores": scores,
                 "last_run": now_utc.isoformat(),
             }
-
-            await _insert("data", result)
+            
+            await _upsert("data", result)
             yield send_sse_message({"step": "complete", "status": "success", "data": result})
 
         except Exception as e:

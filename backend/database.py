@@ -31,3 +31,13 @@ async def _upsert(table: str, data: List[dict]):
         return supabase.table(table).upsert(data).execute()
     res = await asyncio.to_thread(upsert_fn)
     return res
+
+async def _delete(table: str, filters: Optional[List] = None):
+    def delete_fn():
+        query_builder = supabase.table(table)
+        if filters:
+            for column, value in filters:
+                query_builder = query_builder.eq(column, value)
+        return query_builder.delete().execute()
+    res = await asyncio.to_thread(delete_fn)
+    return res

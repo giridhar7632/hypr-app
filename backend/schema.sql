@@ -39,9 +39,8 @@ CREATE TABLE live_quotes (
 );
 
 CREATE TABLE data (
-  id SERIAL PRIMARY KEY,
   
-  ticker VARCHAR(10) NOT NULL,
+  ticker TEXT PRIMARY KEY NOT NULL,
   last_run TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 
   company_info JSONB,

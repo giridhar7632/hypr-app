@@ -9,7 +9,7 @@ import {
   RadialBarChart,
   CartesianGrid,
   Line,
-  XAxis,
+  XAxis,  
   YAxis,
   Bar,
   ComposedChart,
@@ -24,7 +24,6 @@ import { ArrowUpRight, Loader2, CheckCircle, XCircle, RefreshCw } from 'lucide-r
 import { AnalysisStep, useSSEAnalysis } from '@/hooks/useSSEAnalysis'
 import { formatMillionsToReadable } from '@/lib/utils'
 import FeedTabs from '@/components/FeedTabs'
-
 
 
 const StepIndicator = ({ step, status, message }: AnalysisStep) => {

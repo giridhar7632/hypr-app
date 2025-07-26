@@ -12,3 +12,6 @@ yfinance
 openai
 requests
 curl_cffi
+supabase
+torch
+praw
