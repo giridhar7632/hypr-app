@@ -9,12 +9,10 @@ import {
   RadialBarChart,
   CartesianGrid,
   Line,
-  LineChart,
   XAxis,
   YAxis,
   Bar,
   ComposedChart,
-  ResponsiveContainer
 } from "recharts"
 import {
   ChartConfig,
@@ -22,7 +20,7 @@ import {
   ChartTooltip,
   ChartTooltipContent
 } from '@/components/ui/chart'
-import { ArrowUpRight, TrendingDown, TrendingUp, Loader2, CheckCircle, XCircle, RefreshCw } from 'lucide-react'
+import { ArrowUpRight, Loader2, CheckCircle, XCircle, RefreshCw } from 'lucide-react'
 import { AnalysisStep, useSSEAnalysis } from '@/hooks/useSSEAnalysis'
 import { formatMillionsToReadable } from '@/lib/utils'
 import FeedTabs from '@/components/FeedTabs'
@@ -75,7 +73,6 @@ export default function SymbolPage({ params }: { params: Promise<{ ticker: strin
     startAnalysisMemo();
   }, [ticker])
 
-  // Transform historical data for charts
   const chartData = finalData?.financial_data?.historical_data ? 
     Object.entries(finalData.financial_data.historical_data)
       .map(([date, data]) => ({

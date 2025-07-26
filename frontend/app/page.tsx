@@ -7,21 +7,15 @@ import { useRef } from "react";
 import { SplitText } from "gsap/SplitText";
 import { getQueryClient } from "@/app/get-query-client";
 import { HydrationBoundary, dehydrate } from "@tanstack/react-query";
-import { Stock, usePopularQuotes } from "@/hooks/usePopularQuotes";
-import { horizontalLoop } from "@/lib/horizontalLoop";
 import Marquee from "@/components/Marquee";
 
 gsap.registerPlugin(SplitText);
 
 export default function Home() {
   const queryClient = getQueryClient();
-  const { data: stocks, isLoading } = usePopularQuotes();
 
   const containerRef = useRef<HTMLDivElement>(null);
-  const marqueeRef = useRef<HTMLDivElement>(null);
-  const loopRef = useRef<ReturnType<typeof horizontalLoop> | null>(null);
 
-  // Hero text & marquee fade-in animation
   useGSAP(
     () => {
       if (!containerRef.current) return;
@@ -40,36 +34,6 @@ export default function Home() {
     },
     { scope: containerRef }
   );
-
-  // Horizontal marquee loop animation - useLayoutEffect to sync with DOM updates
-  // useLayoutEffect(() => {
-  //   // Kill previous animation instance if exists
-  //   if (loopRef.current) {
-  //     loopRef.current.kill();
-  //     loopRef.current = null;
-  //   }
-
-  //   if (stocks && stocks.length > 0 && marqueeRef.current) {
-  //     // Select the current marquee items from the DOM
-  //     const items = gsap.utils.toArray(".marquee__item", marqueeRef.current) as HTMLElement[];
-
-  //     if (items.length > 0) {
-  //       loopRef.current = horizontalLoop(items, {
-  //         repeat: -1,
-  //         paddingRight: 16,
-  //         speed: 1,
-  //       });
-  //     }
-  //   }
-
-  //   // Cleanup on unmount or stocks change
-  //   return () => {
-  //     if (loopRef.current) {
-  //       loopRef.current.kill();
-  //       loopRef.current = null;
-  //     }
-  //   };
-  // }, [stocks]);
 
   return (
     <HydrationBoundary state={dehydrate(queryClient)}>
