@@ -7,7 +7,6 @@ pydantic
 pydantic_settings
 pandas
 numpy
-finnhub-python
 yfinance
 openai
 requests

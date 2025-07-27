@@ -68,11 +68,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-import finnhub
-finnhub_client = finnhub.Client(settings.FINNHUB_API_KEY)
-
-async def async_company_profile(ticker_symbol: str):
-    return await asyncio.to_thread(finnhub_client.company_profile2, symbol=ticker_symbol)
+async def async_company_profile(ticker_symbol: str, session: aiohttp.ClientSession):
+    url = f"https://finnhub.io/api/v1/stock/profile2?symbol={ticker_symbol}&token={settings.FINNHUB_API_KEY}"
+    async with session.get(url) as response:
+        if response.status == 200:
+            return await response.json()
+        else:
+            return None
 
 async def get_company_info(ticker_symbol: str):
     # Check cache
@@ -90,7 +92,7 @@ async def get_company_info(ticker_symbol: str):
             "url": profile.get("weburl", "")
         }
     # Not found in cache, call external API
-    profile = await async_company_profile(ticker_symbol)
+    profile = await async_company_profile(ticker_symbol, app.state.aiohttp_session)
     if not profile or not profile.get("name"):
         logger.error(f"No profile data found for {ticker_symbol}")
         return {
@@ -197,7 +199,7 @@ def analyze_sentiment(text: str) -> tuple:
     return sentiment, label, confidence
 
 
-async def get_news_and_analyze(company_name: str, ticker_symbol: Optional[str] = None, days: int = 2, max_articles: int = 20):
+async def get_news_and_analyze(ticker_symbol: str, company_name: Optional[str] = None, days: int = 2, max_articles: int = 20):
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
     from_date = start_date.strftime("%Y-%m-%d")
@@ -226,10 +228,15 @@ async def get_news_and_analyze(company_name: str, ticker_symbol: Optional[str] =
 
     try:
         if ticker_symbol:
-            def get_news():
-                return finnhub_client.company_news(ticker_symbol, _from=from_date, to=to_date)
+            async def get_news(session):
+                url = f"https://finnhub.io/api/v1/company-news?symbol={ticker_symbol}&from={from_date}&to={to_date}&token={settings.FINNHUB_API_KEY}"
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        return await response.json()
+                    else:
+                        return None
 
-            finnhub_news = await asyncio.to_thread(get_news)
+            finnhub_news = await get_news(app.state.aiohttp_session)
 
             for article in finnhub_news[:max_articles]:
                 article_data = process_article(article)
