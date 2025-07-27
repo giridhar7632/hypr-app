@@ -3,7 +3,7 @@ uvicorn[standard]
 websockets
 aiohttp
 transformers
-optimum[onnxruntime]
+torch==2.1.0
 pydantic
 pydantic_settings
 pandas
