@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     
     PORT: int = 8000
     SENTIMENT_ANALYZER_URL: str = "http://localhost:8001"
+    SENTIMENT_ANALYZER_MODEL: str = "ProsusAI/finbert"
     FRONTEND_URL: str = "http://localhost:3000"
     
     class Config:
