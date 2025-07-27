@@ -168,7 +168,11 @@ async def get_financial_data(ticker_symbol: str, period="2mo", interval="1d"):
 
 async def analyze_sentiment(text: str, session: aiohttp.ClientSession) -> tuple:
     try:
-        async with session.post(settings.SENTIMENT_ANALYZER_URL + "/analyze", json={"text": text[:512]}) as resp:
+        clean_text = re.sub(r"http\S+", "", text)
+        clean_text = re.sub(r"@\w+", "", clean_text).strip()
+        if not clean_text:
+            return 0.0, "neutral", 0.5
+        async with session.post(settings.SENTIMENT_ANALYZER_URL + "/analyze", json={"text": clean_text[:512]}) as resp:
             if resp.status == 200:
                 results = await resp.json()
                 if not results.get("data"):

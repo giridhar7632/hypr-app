@@ -2,7 +2,6 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from transformers import pipeline
-import re
 import os
 import logging
 
@@ -43,14 +42,7 @@ async def analyse(input: TextIn):
             "success": False,
             "message": "Model not loaded"
         }
-    clean_text = re.sub(r"http\S+", "", input.text)
-    clean_text = re.sub(r"@\w+", "", clean_text).strip()
-    if not clean_text:
-        return {
-            "success": False,
-            "message": "Invalid input"
-        }
-    results = sentiment_analyzer(clean_text)
+    results = sentiment_analyzer(input.text)
     return {
         "success": True,
         "data": results
