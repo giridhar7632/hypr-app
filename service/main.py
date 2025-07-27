@@ -15,8 +15,8 @@ class TextIn(BaseModel):
 async def lifespan(app: FastAPI):
     global sentiment_analyzer
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    logger.info("Loading sentiment analysis model...")
     model_name = os.environ.get("MODEL_NAME", "ProsusAI/finbert")
+    logger.info(f"Loading sentiment analysis model {model_name}...")
     sentiment_analyzer = pipeline(
         "sentiment-analysis",
         model=model_name,
@@ -51,4 +51,4 @@ async def analyse(input: TextIn):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), reload=False)
