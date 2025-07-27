@@ -7,7 +7,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import logging
 import re
-from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer
 from typing import List, AsyncGenerator, Optional
 from database import _select, _insert, _upsert
 from config import settings
@@ -20,29 +19,25 @@ logger = logging.getLogger(__name__)
 PING_INTERVAL = 20
 POPULAR_TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META"]
 
-sentiment_analyzer = None
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: load model
-    import os
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-    global sentiment_analyzer, popular_quotes_task
-    logger.info("Loading sentiment analysis model...")
-    tokenizer = AutoTokenizer.from_pretrained(settings.SENTIMENT_ANALYZER_MODEL)
-    model = AutoModelForSequenceClassification.from_pretrained(settings.SENTIMENT_ANALYZER_MODEL, load_in_8bit=True, device_map="auto")
-    sentiment_analyzer = pipeline(
-        "sentiment-analysis",
-        model=model,
-        tokenizer=tokenizer,
-        device=-1,
-        top_k=None
-    )
-    logger.info("Model loaded successfully!")
-
-    app.state.aiohttp_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
+    global popular_quotes_task
+    
     logger.info("HTTP session initialized.")
+    app.state.aiohttp_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
+    try:
+        async with app.state.aiohttp_session.get(settings.SENTIMENT_ANALYZER_URL + "/health") as resp:
+            if resp.status == 200:
+                health_data = await resp.json()
+                if health_data.get("success"):
+                    logger.info("Sentiment analyzer service healthy on startup.")
+                else:
+                    logger.warning("Sentiment analyzer service responded but is not healthy!")
+            else:
+                logger.error(f"Sentiment analyzer service /health returned status {resp.status}")
+    except Exception as e:
+        logger.error(f"Could not reach sentiment analyzer service: {e}")
+
  
     popular_quotes_task = asyncio.create_task(broadcast_popular_quotes())
     logger.info("Popular quotes task started successfully!")
@@ -79,7 +74,6 @@ async def async_company_profile(ticker_symbol: str, session: aiohttp.ClientSessi
             return None
 
 async def get_company_info(ticker_symbol: str):
-    # Check cache
     cached_profile_res = await _select("company_info", filters=[("ticker", ticker_symbol)], limit=1)
     if cached_profile_res.data:
         profile = cached_profile_res.data[0]
@@ -93,7 +87,6 @@ async def get_company_info(ticker_symbol: str):
             "marketCap": float(profile.get("marketCapitalization", 0)),
             "url": profile.get("weburl", "")
         }
-    # Not found in cache, call external API
     profile = await async_company_profile(ticker_symbol, app.state.aiohttp_session)
     if not profile or not profile.get("name"):
         logger.error(f"No profile data found for {ticker_symbol}")
@@ -102,7 +95,6 @@ async def get_company_info(ticker_symbol: str):
             "name": ticker_symbol,
             "ticker": ticker_symbol
         }
-    # Save to DB
     await _upsert("company_info", profile)
     return {
         "name": profile.get("name", ticker_symbol),
@@ -174,32 +166,33 @@ async def get_financial_data(ticker_symbol: str, period="2mo", interval="1d"):
         return {"ticker": ticker_symbol, "error": str(e)}
 
 
-def analyze_sentiment(text: str) -> tuple:
-    global sentiment_analyzer
-    if sentiment_analyzer is None:
+async def analyze_sentiment(text: str, session: aiohttp.ClientSession) -> tuple:
+    try:
+        async with session.post(settings.SENTIMENT_ANALYZER_URL + "/analyze", json={"text": text[:512]}) as resp:
+            if resp.status == 200:
+                results = await resp.json()
+                if not results.get("data"):
+                    return 0.0, "neutral", 0.5
+
+                # logger.info(results)
+                scores = {item["label"]: item["score"] for item in results.get("data", [])[0]}
+                pos = scores.get("positive", 0)
+                neg = scores.get("negative", 0)
+                neu = scores.get("neutral", 0)
+                sentiment = pos - neg
+                if sentiment > 0.1:
+                    label = "positive"
+                elif sentiment < -0.1:
+                    label = "negative"
+                else:
+                    label = "neutral"
+                confidence = max(pos, neg, neu)
+                return sentiment, label, confidence
+            else:
+                return 0.0, "neutral", 0.5
+    except Exception as e:
+        logger.error(f"Error analyzing sentiment for text. Error: {e}")
         return 0.0, "neutral", 0.5
-
-    clean_text = re.sub(r"http\S+", "", text)
-    clean_text = re.sub(r"@\w+", "", clean_text).strip()
-    if not clean_text:
-        return 0.0, "neutral", 0.5
-
-    results = sentiment_analyzer(clean_text[:512])
-    scores = {item["label"]: item["score"] for item in results[0]}
-    pos = scores.get("positive", 0)
-    neg = scores.get("negative", 0)
-    neu = scores.get("neutral", 0)
-    sentiment = pos - neg
-    if sentiment > 0.1:
-        label = "positive"
-    elif sentiment < -0.1:
-        label = "negative"
-    else:
-        label = "neutral"
-    confidence = max(pos, neg, neu)
-
-    return sentiment, label, confidence
-
 
 async def get_news_and_analyze(ticker_symbol: str, company_name: Optional[str] = None, days: int = 2, max_articles: int = 20):
     end_date = datetime.now()
@@ -208,10 +201,10 @@ async def get_news_and_analyze(ticker_symbol: str, company_name: Optional[str] =
     to_date = end_date.strftime("%Y-%m-%d")
     articles_data = []
 
-    def process_article(article):
+    async def process_article(article):
         try:
             text_to_analyze = article.get("headline", "") + " " + article.get("summary", "")
-            sentiment, label, confidence = analyze_sentiment(text_to_analyze)
+            sentiment, label, confidence = await analyze_sentiment(text_to_analyze, app.state.aiohttp_session)
             return {
                 "title": article.get("headline", ""),
                 "description": article.get("summary", ""),
@@ -241,7 +234,7 @@ async def get_news_and_analyze(ticker_symbol: str, company_name: Optional[str] =
             finnhub_news = await get_news(app.state.aiohttp_session)
 
             for article in finnhub_news[:max_articles]:
-                article_data = process_article(article)
+                article_data = await process_article(article)
                 if article_data:
                     articles_data.append(article_data)
 
@@ -257,14 +250,10 @@ async def get_news_and_analyze(ticker_symbol: str, company_name: Optional[str] =
 
 async def scrape_social_media(company_name: str, search_queries: List[str], max_results=30):
     loop = asyncio.get_event_loop()
-    reddit_posts = await loop.run_in_executor(
-      None,
-      lambda: fetch_reddit_posts(company_name, search_queries, analyze_sentiment, limit=max_results)
-    )
-    bluesky_posts = await loop.run_in_executor(
-      None,
-      lambda: fetch_bluesky_posts(company_name, search_queries, analyze_sentiment, max_results=max_results)
-    )
+    async def analyze_sentiment_wrapper(text: str):
+        return await analyze_sentiment(text, app.state.aiohttp_session)
+    reddit_posts = await fetch_reddit_posts(company_name=company_name, search_queries=search_queries, analyze_sentiment=analyze_sentiment_wrapper, limit=max_results)
+    bluesky_posts = await fetch_bluesky_posts(company_name=company_name, search_queries=search_queries, session=app.state.aiohttp_session, analyze_sentiment=analyze_sentiment_wrapper, max_results=max_results)
     all_posts = reddit_posts + bluesky_posts
 
     if not all_posts:
@@ -452,7 +441,7 @@ async def analyze(data: AnalyzeItem):
 
             # step 3: news and analyze
             yield send_sse_message({"step": "news", "status": "started", "message": "Analyzing news"})
-            news_data = await get_news_and_analyze(company_info["name"], ticker_symbol=ticker)
+            news_data = await get_news_and_analyze(company_name=company_info["name"], ticker_symbol=ticker)
             yield send_sse_message({"step": "news", "status": "success", "message": f"Found {len(news_data['articles'])} articles"})
 
             # step 4: expand keywords and generate queries

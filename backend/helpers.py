@@ -1,6 +1,6 @@
 import pytz
-import praw
 import json
+import aiohttp
 from openai import AsyncOpenAI
 import numpy as np
 import pandas as pd
@@ -8,6 +8,7 @@ from typing import List, Optional, Dict, Any
 from config import settings
 from pydantic import BaseModel
 from datetime import datetime, time, timedelta, timezone, date
+import asyncpraw
 
 class AnalyzeItem(BaseModel):
     symbol: str
@@ -51,7 +52,7 @@ async def expand_keywords_and_generate_queries(company_name: str, industry: str)
     default_queries = [f"{company_name} {kw}" for kw in keywords]
     prompt = (
         f'Given the company "{company_name}" in the {industry} industry, '
-        "provide 5 semantic search queries for social media news and updates. Output:\n"
+        "provide 5 semantic search queries for social media news and updates, focusing on real-time updates, investor sentiment, product news, or financial performance. Output:\n"
         '{ "search_queries": [...] }'
     )
 
@@ -75,101 +76,120 @@ async def expand_keywords_and_generate_queries(company_name: str, industry: str)
         print(f"OpenAI expansion failed: {e}")
         return {"search_queries": default_queries}
 
-def fetch_reddit_posts(company_name: str, search_queries: List[str], analyze_sentiment, limit=30):
+async def fetch_reddit_posts(company_name: str, search_queries: List[str], analyze_sentiment, limit: int = 30):
+    posts, min_posts_target = [], 20
+    subreddits = ["stocks", "investing", "wallstreetbets", "StockMarket", "finance", "economy", "business"]
+
     try:
-        reddit = praw.Reddit(
-            client_id=settings.REDDIT_CLIENT_ID, client_secret=settings.REDDIT_CLIENT_SECRET,
-            user_agent=settings.REDDIT_USER_AGENT
-        )
-        posts, min_posts_target = [], 20
-        subreddits = ["stocks", "investing", "wallstreetbets", "StockMarket", "finance", "economy", "business"]
-        try:
-            company_subreddit = reddit.subreddit(company_name.lower())
-            _ = company_subreddit.created_utc
-            subreddits.insert(0, company_name.lower())
-        except Exception:
-            pass
-        one_week_ago = (datetime.now() - timedelta(days=7)).timestamp()
-        for subreddit_name in subreddits:
-            if len(posts) >= min_posts_target:
-                break
-            try:
-                subreddit = reddit.subreddit(subreddit_name)
-                for query in search_queries:
-                    for submission in subreddit.search(query, sort="new", time_filter="week", limit=limit):
-                        if submission.created_utc < one_week_ago:
-                            continue
-                        post = {
-                            "platform": "Reddit",
-                            "title": submission.title,
-                            "description": (submission.selftext or "")[:512],
-                            "text": submission.title + " " + (submission.selftext or ""),
-                            "created_at": datetime.fromtimestamp(submission.created_utc, tz=timezone.utc).isoformat(),
-                            "username": getattr(submission.author, 'name', '[deleted]'),
-                            "likes": submission.score,
-                            "comments": submission.num_comments,
-                            "engagement": submission.score + submission.num_comments,
-                            "url": f"https://www.reddit.com{submission.permalink}",
-                            "subreddit": subreddit.display_name
-                        }
-                        sentiment, label, confidence = analyze_sentiment(post["text"])
-                        post.update({"sentiment": sentiment, "label": label, "confidence": confidence})
-                        post.pop("text")
-                        posts.append(post)
+        async with asyncpraw.Reddit(client_id=settings.REDDIT_CLIENT_ID, client_secret=settings.REDDIT_CLIENT_SECRET, user_agent=settings.REDDIT_USER_AGENT) as reddit:
+            try: # Try to insert the company's own subreddit if it exists.
+                company_subreddit = await reddit.subreddit(company_name.lower())
+                _ = company_subreddit.created_utc
+                subreddits.insert(0, company_name.lower())
+            except Exception:
+                pass
+
+            one_week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).timestamp()
+
+            for subreddit_name in subreddits:
+                if len(posts) >= min_posts_target:
+                    break
+                try:
+                    subreddit = await reddit.subreddit(subreddit_name)
+                    for query in search_queries:
+                        async for submission in subreddit.search(query, sort="new", time_filter="week", limit=limit):
+                            if submission.created_utc < one_week_ago:
+                                continue
+                            post = {
+                                "platform": "Reddit",
+                                "title": submission.title,
+                                "description": (submission.selftext or "")[:512],
+                                "text": submission.title + " " + (submission.selftext or ""),
+                                "created_at": datetime.fromtimestamp(
+                                    submission.created_utc, tz=timezone.utc
+                                ).isoformat(),
+                                "username": getattr(submission.author, 'name', '[deleted]'),
+                                "likes": submission.score,
+                                "comments": submission.num_comments,
+                                "engagement": submission.score + submission.num_comments,
+                                "url": f"https://www.reddit.com{submission.permalink}",
+                                "subreddit": subreddit.display_name
+                            }
+                            sentiment, label, confidence = await analyze_sentiment(post["text"])
+                            post.update({
+                                "sentiment": sentiment,
+                                "label": label,
+                                "confidence": confidence
+                            })
+                            post.pop("text")
+                            posts.append(post)
                         if len(posts) >= min_posts_target:
                             break
-            except Exception as e:
-                print(f"Subreddit {subreddit_name} error: {e}")
+                    if len(posts) >= min_posts_target:
+                        break
+                except Exception as e:
+                    print(f"Subreddit {subreddit_name} error: {e}")
         return posts
     except Exception as e:
         print(f"Reddit API/init error: {e}")
         return []
 
-def fetch_bluesky_posts(company_name: str, search_queries: List[str], analyze_sentiment, max_results: int = 30):
-    import requests
+async def fetch_bluesky_posts(company_name: str, search_queries: List[str], session: aiohttp.ClientSession, analyze_sentiment, max_results: int = 30):
     BLUESKY_API = "https://bsky.social/xrpc"
+    posts = []
     try:
-        auth = requests.post(
-            f"{BLUESKY_API}/com.atproto.server.createSession",
-            json={"identifier": settings.BSKY_IDENTIFIER, "password": settings.BSKY_PASSWORD}
-        )
-        auth.raise_for_status()
-        access_token = auth.json()["accessJwt"]
-        headers = {"Authorization": f"Bearer {access_token}"}
-        posts = []
+        # Authenticate
+        async with session.post(f"{BLUESKY_API}/com.atproto.server.createSession", json={"identifier": settings.BSKY_IDENTIFIER, "password": settings.BSKY_PASSWORD}) as auth_resp:
+            auth_resp.raise_for_status()
+            auth_data = await auth_resp.json()
+            access_token = auth_data.get("accessJwt")
+            if not access_token:
+                print("Bluesky auth failed: no access token received")
+                return []
+            headers = {"Authorization": f"Bearer {access_token}"}
+
         for query in search_queries:
             try:
-                res = requests.get(
-                    f"{BLUESKY_API}/app.bsky.feed.searchPosts",
-                    headers=headers, params={"q": query, "limit": max_results}
-                )
-                res.raise_for_status()
-                for post_data in res.json().get("posts", []):
-                    text = post_data.get("record", {}).get("text", "")
-                    if not text:
-                        continue
-                    sentiment, label, confidence = analyze_sentiment(text)
-                    posts.append({
-                        "platform":"Bluesky",
-                        "text": text,
-                        "created_at": datetime.fromisoformat(post_data.get("indexedAt").replace('Z', '+00:00')),
-                        "username": post_data.get("author", {}).get("handle", "unknown"),
-                        "likes":0, "comments":0, "engagement":0,
-                        "url": f"https://bsky.app/profile/{post_data['author']['handle']}",
-                        "sentiment": sentiment, "label": label, "confidence": confidence
-                    })
+                params = {"q": query, "limit": max_results}
+                async with session.get(f"{BLUESKY_API}/app.bsky.feed.searchPosts", headers=headers, params=params) as res:
+                    res.raise_for_status()
+                    data = await res.json()
+                    for post_data in data.get("posts", []):
+                        record = post_data.get("record", {})
+                        text = record.get("text", "")
+                        if not text:
+                            continue
+                        sentiment, label, confidence = await analyze_sentiment(text)
+                        created_at_str = post_data.get("indexedAt")
+                        try:
+                            created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00')) if created_at_str else None
+                        except Exception:
+                            created_at = None
+                        author = post_data.get("author", {})
+                        username = author.get("handle", "unknown")
+                        posts.append({
+                            "platform": "Bluesky",
+                            "text": text,
+                            "created_at": created_at.isoformat() if created_at else None,
+                            "username": username,
+                            "likes": 0,   # Bluesky API may not provide these fields in this endpoint
+                            "comments": 0,
+                            "engagement": 0,
+                            "url": f"https://bsky.app/profile/{username}",
+                            "sentiment": sentiment,
+                            "label": label,
+                            "confidence": confidence
+                        })
             except Exception as e:
                 print(f"Bluesky search '{query}': {e}")
+
         return posts
+
     except Exception as e:
         print(f"Bluesky auth failed: {e}")
         return []
 
-def calculate_metrics(
-    financial_data: Dict[str, Any],
-    news_data: Dict[str, Any],
-    social_data: Dict[str, Any]
-) -> Dict[str, Any]:
+def calculate_metrics(financial_data: Dict[str, Any], news_data: Dict[str, Any], social_data: Dict[str, Any]) -> Dict[str, Any]:
     scores = {}
 
     # Financial Momentum (price, volume, volatility)

@@ -2,9 +2,6 @@ fastapi
 uvicorn[standard]
 websockets
 aiohttp
-transformers
-torch
-pydantic
 pydantic_settings
 pandas
 numpy
@@ -12,4 +9,4 @@ yfinance
 openai
 requests
 supabase
-praw
+asyncpraw
