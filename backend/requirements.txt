@@ -3,6 +3,7 @@ uvicorn[standard]
 websockets
 aiohttp
 transformers
+optimum[onnxruntime]
 pydantic
 pydantic_settings
 pandas
@@ -11,5 +12,4 @@ yfinance
 openai
 requests
 supabase
-torch
 praw

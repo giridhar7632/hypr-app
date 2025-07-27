@@ -7,7 +7,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import logging
 import re
-from transformers import pipeline
+from transformers import pipeline, AutoTokenizer
+from optimum.onnxruntime import ORTModelForSequenceClassification
 from typing import List, AsyncGenerator, Optional
 import torch
 from database import _select, _insert, _upsert
@@ -31,9 +32,12 @@ async def lifespan(app: FastAPI):
 
     global sentiment_analyzer, popular_quotes_task
     logger.info("Loading sentiment analysis model...")
+    model = ORTModelForSequenceClassification.from_pretrained(settings.SENTIMENT_ANALYZER_MODEL, from_transformers=True)
+    tokenizer = AutoTokenizer.from_pretrained(settings.SENTIMENT_ANALYZER_MODEL)
     sentiment_analyzer = pipeline(
         "sentiment-analysis",
-        model="mrm8488/distilroberta-finetuned-financial-news-sentiment-analysis",
+        model=model,
+        tokenizer=tokenizer,
         device="cuda" if torch.cuda.is_available() else "cpu",
         top_k=None
     )

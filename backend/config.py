@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     REDDIT_USER_AGENT: str
     
     PORT: int = 8000
+    SENTIMENT_ANALYZER_MODEL: str = "ProsusAI/finbert"
     FRONTEND_URL: str = "http://localhost:3000"
     
     class Config:
