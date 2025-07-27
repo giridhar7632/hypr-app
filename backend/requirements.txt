@@ -3,7 +3,6 @@ uvicorn[standard]
 websockets
 aiohttp
 transformers
---index-url https://download.pytorch.org/whl/cpu
 torch
 pydantic
 pydantic_settings
