@@ -511,9 +511,13 @@ async def get_alpha_vantage_trending_route():
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok"}
+    return {"success": True}
+
+@app.head("/health")
+def health_head():
+    return
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=settings.PORT, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=settings.PORT, reload=False)

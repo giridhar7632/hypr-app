@@ -34,6 +34,10 @@ def health():
         "success": sentiment_analyzer is not None
     }
 
+@app.head("/health")
+def health_head():
+    return
+
 @app.post("/analyze")
 async def analyse(input: TextIn):
     global sentiment_analyzer
