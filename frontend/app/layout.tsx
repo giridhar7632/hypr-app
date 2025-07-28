@@ -26,8 +26,8 @@ export default function RootLayout({
       <body
         className={`${grotesk.className} antialiased`}
       >
-        <Nav />
         <Providers>
+        <Nav />
         {children}
         </Providers>
       </body>

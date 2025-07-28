@@ -8,6 +8,7 @@ import { useTransitionRouter } from "next-view-transitions";
 
 import {SimpleTextReveal} from "@/components/SimpleTextReveal";
 import ReactLenis from "lenis/react";
+import { useHealthCheck } from "@/hooks/useHealthCheck";
 
 function Card({ ticker, change_amount, change_percentage, price, delay }: Stock & { delay?: boolean }) {
   return (
@@ -79,12 +80,13 @@ function SkeletonCard() {
 }
 
 export default function Discover() {
-
-  const { data: stocks, isLoading } = usePopularQuotes();
+  const { data: healthCheckData, isLoading: isHealthCheckLoading, isError: isHealthCheckError } = useHealthCheck();
+  const turnOnDemoMode = !healthCheckData?.success || isHealthCheckLoading || isHealthCheckError;
+  const { data: stocks, isLoading } = usePopularQuotes(turnOnDemoMode);
   const {data: trending, isLoading: isTrendingLoading} = useQuery({
     queryKey: ['trending-stocks'],
     queryFn: () => fetchData(`${process.env.NEXT_PUBLIC_BACKEND_URL || ''}/trending`),
-    enabled: !isLoading,
+    enabled: !isLoading && !turnOnDemoMode,
     refetchOnWindowFocus: true
   });
     const router = useTransitionRouter()

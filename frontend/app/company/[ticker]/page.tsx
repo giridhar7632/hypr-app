@@ -1,5 +1,5 @@
 'use client'
-import { use, useCallback, useEffect } from 'react'
+import { use, useCallback, useEffect, useRef } from 'react'
 import { SimpleTextReveal } from '@/components/SimpleTextReveal'
 import {
   Label,
@@ -24,6 +24,7 @@ import { ArrowUpRight, Loader2, CheckCircle, XCircle, RefreshCw } from 'lucide-r
 import { AnalysisStep, useSSEAnalysis } from '@/hooks/useSSEAnalysis'
 import { formatMillionsToReadable } from '@/lib/utils'
 import FeedTabs from '@/components/FeedTabs'
+import { useHealthCheck } from '@/hooks/useHealthCheck'
 
 
 const StepIndicator = ({ step, status, message }: AnalysisStep) => {
@@ -64,15 +65,25 @@ const StepIndicator = ({ step, status, message }: AnalysisStep) => {
 
 export default function SymbolPage({ params }: { params: Promise<{ ticker: string }> }) {
   const { ticker } = use(params)
+  const { data: healthCheckData, isLoading: isHealthCheckLoading, isError: isHealthCheckError } = useHealthCheck();
+  const turnOnDemoMode = !healthCheckData?.success || isHealthCheckError;
   const { steps, finalData, isLoading, error, startAnalysis, isCache } = useSSEAnalysis(ticker)
 
+  const hasStartedAnalysis = useRef(false);
+
   const startAnalysisMemo = useCallback(() => {
-    startAnalysis();
+    startAnalysis(turnOnDemoMode);
+    hasStartedAnalysis.current = true;
   }, [startAnalysis]);
   
   useEffect(() => {
-    startAnalysisMemo();
-  }, [ticker])
+    if (ticker && !isHealthCheckLoading) {
+      if (!hasStartedAnalysis.current) {
+        startAnalysisMemo();
+        hasStartedAnalysis.current = true;
+      }
+    }
+  }, [ticker, turnOnDemoMode, hasStartedAnalysis, isHealthCheckLoading])
 
   const chartData = finalData?.financial_data?.historical_data ? 
     Object.entries(finalData.financial_data.historical_data)
@@ -149,36 +160,37 @@ export default function SymbolPage({ params }: { params: Promise<{ ticker: strin
   return (
     <div className="company discover flex flex-col items-center w-screen min-h-screen my-16 py-16">
       <div className={`flex items-center justify-end mb-8 w-full px-8`}>
-      {isCache ? <p className="text-sm text-neutral-400 animate-pulse">refreshing cache...</p> : 
+        
+      {turnOnDemoMode ? <p className="text-sm text-neutral-400">demo mode (last updated on {new Date(data.last_run).toLocaleString()}).</p> : isCache ? <p className="text-sm text-neutral-400 animate-pulse">refreshing cache...</p> : 
       <p className='cursor-pointer p-2 flex items-center gap-2 bg-white/50 backdrop-blur-sm px-4 py-2 hover:bg-black/5 border border-[#eee]/50 rounded-lg'><RefreshCw className="w-4 h-4" onClick={() => startAnalysis(true)} /> refresh</p>
       }
       </div>
-        <SimpleTextReveal delay={0.5} className="text-3xl md:text-[6vw] font-bold tracking-tight leading-tight text-center">
+        <SimpleTextReveal delay={0} className="text-3xl md:text-[6vw] font-bold tracking-tight leading-tight text-center">
           <h1>{data.company_info.name}</h1>
         </SimpleTextReveal>
 
       <div className='flex text-3xl md:text-[6vw] bg-[#111] flex-wrap md:flex-nowrap justify-between md:gap-4 py-4 md:py-2 text-[#eee] w-full h-full items-center px-2'>
         <div className='w-[50%] md:w-[25%] text-left overflow-hidden flex flex-col'>
           <p className='text-sm font-normal text-[#eee]'>Symbol</p>
-          <SimpleTextReveal start={"top 95%"} delay={1.2} className="font-bold tracking-tight leading-tight whitespace-nowrap">
+          <SimpleTextReveal start={"top 95%"} delay={0} className="font-bold tracking-tight leading-tight whitespace-nowrap">
             <p>{data.company_info.ticker}</p>
           </SimpleTextReveal>
         </div>
         <div className='w-[50%] md:w-[25%] text-left overflow-hidden flex flex-col'>
           <p className='text-sm font-normal text-[#eee]'>Current Price</p>
-          <SimpleTextReveal start={"top 95%"} delay={1.2} className="font-bold tracking-tight leading-tight whitespace-nowrap">
+          <SimpleTextReveal start={"top 95%"} delay={0} className="font-bold tracking-tight leading-tight whitespace-nowrap">
             <p><span className='text-sm md:text-2vw'>$</span>{data.financial_data.current_price.toFixed(2)}</p>
           </SimpleTextReveal>
         </div>
         <div className='w-[50%] md:w-[25%] text-left overflow-hidden flex flex-col'>
           <p className='text-sm font-normal text-[#eee]'>Change (%)</p>
-          <SimpleTextReveal start={"top 95%"} delay={1.2} className={`font-semibold tracking-tight leading-tight whitespace-nowrap ${data.financial_data.price_change > 0 ? 'text-green-500' : 'text-red-500'}`}>
+          <SimpleTextReveal start={"top 95%"} delay={0} className={`font-semibold tracking-tight leading-tight whitespace-nowrap ${data.financial_data.price_change > 0 ? 'text-green-500' : 'text-red-500'}`}>
             <p>{data.financial_data.price_change > 0 ? '+' : ''}{data.financial_data.price_change.toFixed(2)}%</p>
           </SimpleTextReveal>
         </div>
         <div className='w-[50%] md:w-[25%] text-left overflow-hidden flex flex-col'>
           <p className='text-sm font-normal text-[#eee]'>Signal</p>
-          <SimpleTextReveal start={"top 95%"} delay={1.2} className={`font-semibold tracking-tight leading-tight whitespace-nowrap ${data.scores.trading_signal === 'BUY' ? 'text-green-500' : data.scores.trading_signal === 'SELL' ? 'text-red-500' : 'text-yellow-500'}`}>
+          <SimpleTextReveal start={"top 95%"} delay={0} className={`font-semibold tracking-tight leading-tight whitespace-nowrap ${data.scores.trading_signal === 'BUY' ? 'text-green-500' : data.scores.trading_signal === 'SELL' ? 'text-red-500' : 'text-yellow-500'}`}>
             <p>{data.scores.trading_signal}</p>
           </SimpleTextReveal>
         </div>
@@ -186,7 +198,7 @@ export default function SymbolPage({ params }: { params: Promise<{ ticker: strin
 
       <div className="w-full flex flex-col md:flex-row px-4 md:px-8 my-8">
         <p className="w-full md:w-[40%]">About the company:</p>
-        <SimpleTextReveal start={"top 95%"} delay={1.2} className="tracking-tight leading-tight whitespace-wrap md:w-[60%]">
+        <SimpleTextReveal start={"top 95%"} delay={0.5} className="tracking-tight leading-tight whitespace-wrap md:w-[60%]">
           <p>{data.financial_data.description.slice(0, 512)}...</p>
         </SimpleTextReveal>
       </div>

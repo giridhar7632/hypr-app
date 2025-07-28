@@ -1,9 +1,13 @@
 import { useEffect, useRef } from "react";
 import gsap from "gsap";
 import { usePopularQuotes, Stock } from "@/hooks/usePopularQuotes";
+import { useHealthCheck } from "@/hooks/useHealthCheck";
 
 export default function Marquee() {
-  const { data: stocks, isLoading } = usePopularQuotes();
+  const { data: healthCheckData, isLoading: isHealthCheckLoading, isError: isHealthCheckError } = useHealthCheck();
+  const turnOnDemoMode = !healthCheckData?.success || isHealthCheckLoading || isHealthCheckError;
+
+  const { data: stocks, isLoading } = usePopularQuotes(turnOnDemoMode);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);

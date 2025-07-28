@@ -1,3 +1,4 @@
+import { getQuoteData } from "@/app/actions"
 import { useState } from "react"
 
 export interface AnalysisStep {
@@ -9,6 +10,7 @@ export interface AnalysisStep {
 
 export interface AnalysisData {
   ticker: string
+  last_run: string
   company_info: {
     name: string
     ticker: string
@@ -72,12 +74,23 @@ export const useSSEAnalysis = (ticker: string) => {
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const startAnalysis = async (forceRefresh = false) => {
+  const startAnalysis = async (isdemo = false, forceRefresh = false) => {
     setSteps([])
     setFinalData(null)
     setIsLoading(true)
     setError(null)
     setIsCache(false)
+
+    if(isdemo) {
+      const result = await getQuoteData(ticker)
+      if(result) {
+        setFinalData(result)
+      } else {
+        setError("Failed to fetch data")
+      }
+      setIsLoading(false)
+      return
+    }
 
     try {
       const response = await fetch(

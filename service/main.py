@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from transformers import pipeline
 import os
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 sentiment_analyzer = None
@@ -46,7 +47,10 @@ async def analyse(input: TextIn):
             "success": False,
             "message": "Model not loaded"
         }
+    start_time = time.perf_counter()
     results = sentiment_analyzer(input.text)
+    end_time = time.perf_counter()
+    print(f"Analysis completed in {end_time - start_time:.2f} seconds")
     return {
         "success": True,
         "data": results
@@ -55,4 +59,4 @@ async def analyse(input: TextIn):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), reload=False)
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8001)), reload=False)

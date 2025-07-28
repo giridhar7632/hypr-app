@@ -5,6 +5,8 @@ import { ArrowUpRight, RotateCw } from "lucide-react"
 import { useTransitionRouter } from "next-view-transitions"
 import { SimpleTextReveal } from "@/components/SimpleTextReveal"
 import React, { useState, useEffect, useRef, useCallback, useLayoutEffect } from "react"
+import { useHealthCheck } from "@/hooks/useHealthCheck"
+import { usePopularQuotes } from "@/hooks/usePopularQuotes"
 
 interface SymbolResult {
   description: string
@@ -14,6 +16,9 @@ interface SymbolResult {
 }
 
 export default function SymbolSearch() {
+  const { data: healthCheckData, isLoading: isHealthCheckLoading, isError: isHealthCheckError } = useHealthCheck();
+  const turnOnDemoMode = !healthCheckData?.success || isHealthCheckLoading || isHealthCheckError;
+  const {data: popularQuotes, isLoading: isPopularQuotesLoading} = usePopularQuotes(turnOnDemoMode)
   const [query, setQuery] = useState("")
   const [results, setResults] = useState<SymbolResult[]>([])
   const [isLoading, setIsLoading] = useState(false)
@@ -26,6 +31,17 @@ export default function SymbolSearch() {
   const fetchResults = useCallback(async (searchText: string) => {
     if (!searchText.trim()) {
       setResults([])
+      return
+    }
+
+    if(turnOnDemoMode) {
+      setResults(popularQuotes?.map((item) => ({
+        description: item.ticker,
+        displaySymbol: item.ticker,
+        symbol: item.ticker,
+        type: "stock"
+      })) || [])
+
       return
     }
     setIsLoading(true)

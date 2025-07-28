@@ -26,7 +26,7 @@ export default function Home() {
       gsap.to(heroText.words, {
         opacity: 1,
         y: 0,
-        duration: 1,
+        duration: 0.8,
         ease: "power4.out",
         stagger: 0.075,
         delay: 0,
