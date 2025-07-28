@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings
 from typing import Optional
 
 class Settings(BaseSettings):
+    ENV: str = "production"
     SUPABASE_URL: str
     SUPABASE_KEY: str
     CONNECTION_URI: str

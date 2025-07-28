@@ -188,6 +188,7 @@ async def analyze_sentiment(text: str, session: aiohttp.ClientSession) -> tuple:
             return 0.0, "neutral", 0.5
         
         # results = sentiment_analyzer(clean_text[:512])
+        start_time = py_time.perf_counter()
         async with session.post(settings.SENTIMENT_ANALYZER_URL + "/analyze", json={"text": clean_text[:512]}) as resp:
             if resp.status == 200:
                 results = await resp.json()
@@ -207,6 +208,8 @@ async def analyze_sentiment(text: str, session: aiohttp.ClientSession) -> tuple:
                 else:
                     label = "neutral"
                 confidence = max(pos, neg, neu)
+                elapsed_time = py_time.perf_counter() - start_time
+                logger.info(f"Sentiment analysis took {elapsed_time:.2f} seconds")
                 return sentiment, label, confidence
             else:
                 return 0.0, "neutral", 0.5
@@ -575,4 +578,4 @@ def health_head():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=settings.PORT, reload=False)
+    uvicorn.run("main:app", host="0.0.0.0", port=settings.PORT, reload=settings.ENV == "development")
