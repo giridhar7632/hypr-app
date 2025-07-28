@@ -2,12 +2,3 @@ fastapi
 uvicorn[standard]
 transformers
 torch
-aiohttp
-pydantic_settings
-pandas
-numpy
-openai
-requests
-supabase
-asyncpraw
-yfinance
