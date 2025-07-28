@@ -2,7 +2,7 @@ import { useState } from "react"
 
 export interface AnalysisStep {
   step: string
-  status: "started" | "success" | "error" | "warning"
+  status: "started" | "processing" | "success" | "error" | "warning"
   message: string
   data?: any
 }
@@ -124,6 +124,7 @@ export const useSSEAnalysis = (ticker: string) => {
               try {
                 const jsonString = dataLine.replace(/^data:\s*/, "")
                 const data = JSON.parse(jsonString)
+                if(data.step === "heartbeat") continue
 
                 setSteps((prev) => {
                   const existing = prev.find((s) => s.step === data.step)

@@ -31,6 +31,8 @@ const StepIndicator = ({ step, status, message }: AnalysisStep) => {
     switch (status) {
       case 'started':
         return <Loader2 className="w-5 h-5 animate-spin text-blue-500" />
+      case 'processing':
+        return <Loader2 className="w-5 h-5 animate-spin text-blue-500" />
       case 'success':
         return <CheckCircle className="w-5 h-5 text-green-500" />
       case 'error':

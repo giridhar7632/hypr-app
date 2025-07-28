@@ -10,5 +10,3 @@ openai
 requests
 supabase
 asyncpraw
-transformers
-torch

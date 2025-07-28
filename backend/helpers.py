@@ -1,6 +1,5 @@
 import pytz
 import json
-import time
 import aiohttp
 from openai import AsyncOpenAI
 import numpy as np
@@ -116,11 +115,7 @@ async def fetch_reddit_posts(company_name: str, search_queries: List[str], analy
                                 "url": f"https://www.reddit.com{submission.permalink}",
                                 "subreddit": subreddit.display_name
                             }
-                            start_time = time.perf_counter()
                             sentiment, label, confidence = await analyze_sentiment(post["text"])
-                            elapsed_time = time.perf_counter() - start_time
-                            # if send_sse_message is not None:
-                            send_sse_message({"step": "social", "status": "processing", "message": f"Processed Reddit post: {post.get('title', '')} in {elapsed_time:.2f} seconds"})
                             post.update({
                                 "sentiment": sentiment,
                                 "label": label,
@@ -164,9 +159,7 @@ async def fetch_bluesky_posts(company_name: str, search_queries: List[str], sess
                         text = record.get("text", "")
                         if not text:
                             continue
-                        start_time = time.perf_counter()
                         sentiment, label, confidence = await analyze_sentiment(text)
-                        elapsed_time = time.perf_counter() - start_time
                         created_at_str = post_data.get("indexedAt")
                         try:
                             created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00')) if created_at_str else None
@@ -174,8 +167,6 @@ async def fetch_bluesky_posts(company_name: str, search_queries: List[str], sess
                             created_at = None
                         author = post_data.get("author", {})
                         username = author.get("handle", "unknown")
-                        # if send_sse_message is not None:
-                        send_sse_message({"step": "social", "status": "processing", "message": f"Processed Bluesky post: {post_data.get('text', '')} in {elapsed_time:.2f} seconds"})
                         posts.append({
                             "platform": "Bluesky",
                             "text": text,

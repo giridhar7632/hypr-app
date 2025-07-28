@@ -4,14 +4,14 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, stat
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
 import logging
 import re
-import time
+from datetime import datetime, timedelta, timezone
 from typing import List, AsyncGenerator, Optional
 from database import _select, _insert, _upsert
 from config import settings
 from helpers import *
+import time as py_time
 # from transformers import pipeline
 # import os
 
@@ -214,7 +214,7 @@ async def analyze_sentiment(text: str, session: aiohttp.ClientSession) -> tuple:
         logger.error(f"Error analyzing sentiment for text. Error: {e}")
         return 0.0, "neutral", 0.5
 
-async def get_news_and_analyze(ticker_symbol: str, company_name: Optional[str] = None, days: int = 2, max_articles: int = 20, send_sse_message = None):
+async def get_news_and_analyze(ticker_symbol: str, company_name: Optional[str] = None, days: int = 2, max_articles: int = 20):
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
     from_date = start_date.strftime("%Y-%m-%d")
@@ -224,11 +224,7 @@ async def get_news_and_analyze(ticker_symbol: str, company_name: Optional[str] =
     async def process_article(article):
         try:
             text_to_analyze = article.get("headline", "") + " " + article.get("summary", "")
-            start_time = time.perf_counter()
             sentiment, label, confidence = await analyze_sentiment(text_to_analyze, app.state.aiohttp_session)
-            elapsed_time = time.perf_counter() - start_time
-            if send_sse_message is not None:
-                send_sse_message({"step": "news", "status": "processing", "message": f"Processed article: {article.get('headline', '')} in {elapsed_time:.2f} seconds"})
             return {
                 "title": article.get("headline", ""),
                 "description": article.get("summary", ""),
@@ -280,7 +276,12 @@ async def scrape_social_media(company_name: str, search_queries: List[str], max_
     all_posts = reddit_posts + bluesky_posts
 
     if not all_posts:
-        return []
+        return {
+            "posts": [],
+            "top_posts": [],
+            "total_posts": 0,
+            "avg_sentiment": 0,
+        }
 
     sentiments = [post["sentiment"] for post in all_posts]
     avg_sentiment = sum(sentiments) / len(sentiments)
@@ -464,8 +465,25 @@ async def analyze(data: AnalyzeItem):
 
             # step 3: news and analyze
             yield send_sse_message({"step": "news", "status": "started", "message": "Analyzing news"})
-            news_data = await get_news_and_analyze(company_name=company_info["name"], ticker_symbol=ticker)
-            yield send_sse_message({"step": "news", "status": "success", "message": f"Found {len(news_data['articles'])} articles"})
+            start_time = py_time.perf_counter()
+            news_task = asyncio.create_task(
+                get_news_and_analyze(company_name=company_info["name"], ticker_symbol=ticker)
+            )
+
+            while not news_task.done():
+                yield send_sse_message({"step": "heartbeat", "status": "processing", "message": "still analyzing news..."})
+                await asyncio.sleep(5) # Wait for 5 seconds
+
+            news_data = {}
+            try:
+                news_data = news_task.result()
+            except Exception as e:
+                logger.error(f"Error during news analysis for {ticker}: {e}", exc_info=True)
+                yield send_sse_message({"step": "news", "status": "error", "message": f"Failed during news analysis: {e}"})
+                return
+
+            elapsed_time = py_time.perf_counter() - start_time
+            yield send_sse_message({"step": "news", "status": "success", "message": f"Found and analyzed {len(news_data['articles'])} articles in {elapsed_time:.2f} seconds"})
 
             # step 4: expand keywords and generate queries
             yield send_sse_message({"step": "keywords", "status": "started", "message": "Expanding keywords"})
@@ -474,8 +492,26 @@ async def analyze(data: AnalyzeItem):
 
             # step 5: scrape social media
             yield send_sse_message({"step": "social", "status": "started", "message": "Analyzing social media"})
-            social_data = await scrape_social_media(company_name=company_info['name'], search_queries=expanded_data['search_queries'])
-            yield send_sse_message({"step": "social", "status": "success", "message": f"Analyzed {social_data['total_posts']} posts"})
+            start_time = py_time.perf_counter()
+
+            social_task = asyncio.create_task(
+                scrape_social_media(company_name=company_info['name'], search_queries=expanded_data['search_queries'])
+            )
+
+            while not social_task.done():
+                yield send_sse_message({"step": "heartbeat", "status": "processing", "message": "still analyzing social media..."})
+                await asyncio.sleep(5)
+            
+            social_data = {}
+            try:
+                social_data = social_task.result()
+            except Exception as e:
+                logger.error(f"Error during social media analysis for {ticker}: {e}", exc_info=True)
+                yield send_sse_message({"step": "social", "status": "error", "message": f"Failed during social analysis: {e}"})
+                return
+
+            elapsed_time = py_time.perf_counter() - start_time
+            yield send_sse_message({"step": "social", "status": "success", "message": f"Found and analyzed {social_data['total_posts']} posts in {elapsed_time:.2f} seconds"})
 
             # step 6: calculate metrics
             yield send_sse_message({"step": "calculate", "status": "started", "message": "Calculating metrics"})
