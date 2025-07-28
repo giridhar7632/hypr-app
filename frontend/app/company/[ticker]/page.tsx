@@ -36,7 +36,7 @@ const StepIndicator = ({ step, status, message }: AnalysisStep) => {
       case 'error':
         return <XCircle className="w-5 h-5 text-red-500" />
       default:
-        return <div className="w-5 h-5 rounded-full border-2 border-gray-300" />
+        return <div className="w-5 h-5 rounded-full border-2 border-gray-300 animate-pulse" />
     }
   }
 
