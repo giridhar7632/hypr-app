@@ -6,6 +6,9 @@ This project was built to explore the challenges of real-time data aggregation, 
 
 ✨ [Live Preview](https://hypr-app.vercel.app/)
 
+<img width="1512" height="982" alt="og-image" src="https://github.com/user-attachments/assets/74c98051-d7c7-4321-a39a-a99d86259ec5" />
+
+
 ### Core Features
 
 *   **Aggregates Market Data:** Pulls in financial news, company fundamentals, and social media posts from sources like Finnhub, Yahoo Finance, Reddit, and Bluesky.
