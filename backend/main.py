@@ -572,8 +572,9 @@ async def health_check():
     return {"success": True}
 
 @app.head("/health")
-def health_head():
-    return
+async def health_head():
+    rec = await _select("company_info", filters=[("ticker", "AAPL")], limit=1)
+    return {"success": rec.data is not None}
 
 if __name__ == "__main__":
     import uvicorn

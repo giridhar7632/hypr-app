@@ -116,7 +116,7 @@ export default function SymbolPage({ params }: { params: Promise<{ ticker: strin
     },
   } satisfies ChartConfig
 
-  if (error) {
+  if (error && !finalData) {
     return (
       <div className="flex flex-col items-center justify-center min-h-screen">
         <XCircle className="w-16 h-16 text-red-500 mb-4" />
@@ -161,7 +161,7 @@ export default function SymbolPage({ params }: { params: Promise<{ ticker: strin
     <div className="company discover flex flex-col items-center w-screen min-h-screen my-16 py-16">
       <div className={`flex items-center justify-end mb-8 w-full px-8`}>
         
-      {turnOnDemoMode ? <p className="text-sm text-neutral-400">demo mode (last updated on {new Date(data.last_run).toLocaleString()}).</p> : isCache ? <p className="text-sm text-neutral-400 animate-pulse">refreshing cache...</p> : 
+      {turnOnDemoMode ? <p className="text-sm text-neutral-400">demo mode (last updated on {new Date(data.last_run).toLocaleString()}).</p> : finalData && error ? <p className='text-sm text-red-500 italic'>{error}</p> : isCache ? <p className="text-sm text-neutral-400 animate-pulse">refreshing cache...</p> : 
       <p className='cursor-pointer p-2 flex items-center gap-2 bg-white/50 backdrop-blur-sm px-4 py-2 hover:bg-black/5 border border-[#eee]/50 rounded-lg'><RefreshCw className="w-4 h-4" onClick={() => startAnalysis(true)} /> refresh</p>
       }
       </div>
